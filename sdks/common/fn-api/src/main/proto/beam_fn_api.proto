@@ -37,7 +37,7 @@ package org.apache.beam.fn.v1;
 option java_package = "org.apache.beam.fn.v1";
 option java_outer_classname = "BeamFnApi";
 
-import "google/protobuf/any.proto";
+import "beam_runner_api.proto";
 import "google/protobuf/timestamp.proto";
 
 /*
@@ -66,122 +66,6 @@ message Target {
   string name = 2;
 }
 
-// Information defining a PCollection
-message PCollection {
-  // (Required) A reference to a coder.
-  string coder_reference = 1;
-
-  // TODO: Windowing strategy, ...
-}
-
-// A primitive transform within Apache Beam.
-message PrimitiveTransform {
-  // (Required) A pipeline level unique id which can be used as a reference to
-  // refer to this.
-  string id = 1;
-
-  // (Required) A function spec that is used by this primitive
-  // transform to process data.
-  FunctionSpec function_spec = 2;
-
-  // A map of distinct input names to target definitions.
-  // For example, in CoGbk this represents the tag name associated with each
-  // distinct input name and a list of primitive transforms that are associated
-  // with the specified input.
-  map<string, Target.List> inputs = 3;
-
-  // A map from local output name to PCollection definitions. For example, in
-  // DoFn this represents the tag name associated with each distinct output.
-  map<string, PCollection> outputs = 4;
-
-  // TODO: Should we model side inputs as a special type of input for a
-  // primitive transform or should it be modeled as the relationship that
-  // the predecessor input will be a view primitive transform.
-  // A map of from side input names to side inputs.
-  map<string, SideInput> side_inputs = 5;
-
-  // The user name of this step.
-  // TODO: This should really be in display data and not at this level
-  string step_name = 6;
-}
-
-/*
- * User Definable Functions
- *
- * This is still unstable mainly due to how we model the side input.
- */
-
-// Defines the common elements of user-definable functions, to allow the SDK to
-// express the information the runner needs to execute work.
-// Stable
-message FunctionSpec {
-  // (Required) A pipeline level unique id which can be used as a reference to
-  // refer to this.
-  string id = 1;
-
-  // (Required) A globally unique name representing this user definable
-  // function.
-  //
-  // User definable functions use the urn encodings registered such that another
-  // may implement the user definable function within another language.
-  //
-  // For example:
-  //    urn:org.apache.beam:coder:kv:1.0
-  string urn = 2;
-
-  // (Required) Reference to specification of execution environment required to
-  // invoke this function.
-  string environment_reference = 3;
-
-  // Data used to parameterize this function. Depending on the urn, this may be
-  // optional or required.
-  google.protobuf.Any data = 4;
-}
-
-message SideInput {
-  // TODO: Coder?
-
-  // For RunnerAPI.
-  Target input = 1;
-
-  // For FnAPI.
-  FunctionSpec view_fn = 2;
-}
-
-// Defines how to encode values into byte streams and decode values from byte
-// streams. A coder can be parameterized by additional properties which may or
-// may not be language agnostic.
-//
-// Coders using the urn:org.apache.beam:coder namespace must have their
-// encodings registered such that another may implement the encoding within
-// another language.
-//
-// For example:
-//    urn:org.apache.beam:coder:kv:1.0
-//    urn:org.apache.beam:coder:iterable:1.0
-// Stable
-message Coder {
-  // TODO: This looks weird when compared to the other function specs
-  // which use URN to differentiate themselves. Should "Coder" be embedded
-  // inside the FunctionSpec data block.
-
-  // The data associated with this coder used to reconstruct it.
-  FunctionSpec function_spec = 1;
-
-  // A list of component coder references.
-  //
-  // For a key-value coder, there must be exactly two component coder references
-  // where the first reference represents the key coder and the second reference
-  // is the value coder.
-  //
-  // For an iterable coder, there must be exactly one component coder reference
-  // representing the value coder.
-  //
-  // TODO: Perhaps this is redundant with the data of the FunctionSpec
-  // for known coders?
-  repeated string component_coder_reference = 2;
-}
-
 // A descriptor for connecting to a remote port using the Beam Fn Data API.
 // Allows for communication between two environments (for example between the
 // runner and the SDK).
@@ -199,7 +83,7 @@ message RemoteGrpcPort {
  * with the addition of new types of instructions/responses related to metrics.
  */
 
-// An API that describes the work that a SDK Fn Harness is meant to do.
+// An API that describes the work that a SDK harness is meant to do.
 // Stable
 service BeamFnControl {
   // Instructions sent by the runner to the SDK requesting different types
@@ -264,25 +148,38 @@ message RegisterRequest {
 message RegisterResponse {
 }
 
-// A descriptor of references used when processing a bundle.
-// Stable
+// Definitions that should be used to construct the bundle processing graph.
 message ProcessBundleDescriptor {
   // (Required) A pipeline level unique id which can be used as a reference to
   // refer to this.
   string id = 1;
 
-  // (Required) A list of primitive transforms that should
-  // be used to construct the bundle processing graph.
-  repeated PrimitiveTransform primitive_transform = 2;
+  // (Required) A map from pipeline-scoped id to PTransform.
+  map<string, org.apache.beam.runner_api.v1.PTransform> transforms = 2;
 
-  // (Required) The set of all coders referenced in this bundle.
-  repeated Coder coders = 4;
+  // (Required) A map from pipeline-scoped id to PCollection.
+  map<string, org.apache.beam.runner_api.v1.PCollection> pcollections = 3;
+
+  // (Required) A map from pipeline-scoped id to WindowingStrategy.
+  map<string, org.apache.beam.runner_api.v1.WindowingStrategy> windowing_strategies = 4;
+
+  // (Required) A map from pipeline-scoped id to Coder.
+  map<string, org.apache.beam.runner_api.v1.Coder> coders = 5;
+
+  // (Required) A map from pipeline-scoped id to Environment.
+  map<string, org.apache.beam.runner_api.v1.Environment> environments = 6;
 }
 
 // A request to process a given bundle.
 // Stable
 message ProcessBundleRequest {
+  // (Required) A reference to the process bundle descriptor that must be
+  // instantiated and executed by the SDK harness.
   string process_bundle_descriptor_reference = 1;
+
+  // (Optional) A list of cache tokens that can be used by an SDK to reuse
+  // cached data returned by the State API across multiple bundles.
+  repeated bytes cache_tokens = 2;
 }
 
 // Stable
@@ -351,14 +248,14 @@ message PrimitiveTransformSplit {
   //
   // For example, a remote GRPC source will have a specific urn and data
   // block containing an ElementCountRestriction.
-  FunctionSpec completed_restriction = 2;
+  org.apache.beam.runner_api.v1.FunctionSpec completed_restriction = 2;
 
   // (Required) A function specification describing the restriction
   // representing the remainder of work for the primitive transform.
   //
   // FOr example, a remote GRPC source will have a specific urn and data
   // block contain an ElemntCountSkipRestriction.
-  FunctionSpec remaining_restriction = 3;
+  org.apache.beam.runner_api.v1.FunctionSpec remaining_restriction = 3;
 }
 
 message ProcessBundleSplitResponse {
@@ -465,16 +362,12 @@ service BeamFnData {
 
 /*
  * State API
- *
- * This is just a high level sketch of how this could work. There is still
- * a lot of work with respect to how the key spaces for the different types
- * of access required (side inputs, user state, ...) and how state caching
- * works across bundles.
  */
 
 message StateRequest {
   // (Required) An unique identifier provided by the SDK which represents this
-  // requests execution. The StateResponse must have the matching id.
+  // requests execution. The StateResponse corresponding with this request
+  // will have the matching id.
   string id = 1;
 
   // (Required) The associated instruction id of the work that is currently
@@ -482,17 +375,20 @@ message StateRequest {
   // to state to be committed with the appropriate work execution.
   string instruction_reference = 2;
 
-  // At least one of the following fields should be populated.
-  // Also, no request should use a state key referred to in another state key.
+  // (Required) The state key this request is for.
+  StateKey state_key = 3;
 
-  // (Optional) A request to get state.
-  repeated StateGetRequest get = 3;
+  // (Required) The action to take on this request.
+  oneof request {
+    // A request to get state.
+    StateGetRequest get = 1000;
 
-  // (Optional) A request to append to state.
-  repeated StateAppendRequest append = 4;
+    // A request to append to state.
+    StateAppendRequest append = 1001;
 
-  // (Optional) A request to clear state.
-  repeated StateClearRequest clear = 5;
+    // A request to clear state.
+    StateClearRequest clear = 1002;
+  }
 }
 
 message StateResponse {
@@ -501,31 +397,26 @@ message StateResponse {
   // to the SDK.
   string id = 1;
 
-  // (Required) The associated instruction id of the work that is currently
-  // being processed.
-  string instruction_reference = 2;
-
-  // (Required) A key to associate with the version of this state. Allows for
-  // SDKs to share state across work items if they have the same cache key and
-  // state key.
-  bytes cache_key = 3;
-
   // (Optional) If this is specified, then the state request has failed.
   // A human readable string representing the reason as to why the request
   // failed.
-  string error = 4;
+  string error = 2;
 
-  // For every field populated in the StateRequest, there is a matching field in
-  // the StateResponse.
+  // (Optional) If this is specified, then the result of this state request
+  // can be cached using the supplied token.
+  bytes cache_token = 3;
 
-  // (Optional) A response to getting state.
-  repeated StateGetResponse get = 5;
+  // A corresponding response matching the request will be populated.
+  oneof response {
+    // A response to getting state.
+    StateGetResponse get = 1000;
 
-  // (Optional) A response to appending to state.
-  repeated StateAppendResponse append = 6;
+    // A response to appending to state.
+    StateAppendResponse append = 1001;
 
-  // (Optional) A response to clearing state.
-  repeated StateClearResponse clear = 7;
+    // A response to clearing state.
+    StateClearResponse clear = 1002;
+  }
 }
 
 service BeamFnState {
@@ -540,91 +431,87 @@ service BeamFnState {
   ) {}
 }
 
-
-// TODO: Resolve with the other State API.
-service SimpleBeamFnState {
-  // Gets the elements associated with the given key.
-  rpc Get(StateKey) returns (Elements.Data) {}
-  // Appends elements to a given state bag.
-  rpc Append(SimpleStateAppendRequest) returns (Empty) {}
-  // Clears a given state bag.
-  rpc Clear(StateKey) returns (Empty) {}
-}
-
-message Empty {
-}
-
-message SimpleStateAppendRequest {
-  StateKey state_key = 1;
-  repeated bytes data = 2;
-}
-
 message StateKey {
-  // (Required) Represents the namespace for the state. If this state is for a
-  // DoFn, then this reference is expected to point to the DoFn. If this state
-  // is for a side input, then this is expected to reference the ViewFn.
-  string function_spec_reference = 1;
+  message Runner {
+    // (Required) Opaque information supplied by the runner. Used to support
+    // remote references.
+    bytes key = 1;
+  }
 
-  // (Required) The bytes of the window which this state request is for encoded
-  // in the outer context.
-  bytes window = 2;
+  message MultimapSideInput {
+    // (Required) The id of the PTransform containing a side input.
+    string ptransform_id = 1;
+    // (Required) The id of the side input.
+    string side_input_id = 2;
+    // (Required) The window (after mapping the currently executing elements
+    // window into the side input windows domain) encoded in a nested context.
+    bytes window = 3;
+    // (Required) The key encoded in a nested context.
+    bytes key = 4;
+  }
 
-  // (Required) The user key for which the value was encoded in the outer
-  // context.
-  bytes key = 3;
+  message BagUserState {
+    // (Required) The id of the PTransform containing user state.
+    string ptransform_id = 1;
+    // (Required) The id of the user state.
+    string user_state_id = 2;
+    // (Required) The window encoded in a nested context. 
+    bytes window = 3;
+    // (Required) The key of the currently executing element encoded in a
+    // nested context.
+    bytes key = 4;
+  }
+
+  // (Required) One of the following state keys must be set.
+  oneof type {
+    Runner runner = 1;
+    MultimapSideInput multimap_side_input = 2;
+    BagUserState bag_user_state = 3;
+    // TODO: represent a state key for user map state
+  }
 }
 
-message StateKeyOrIterable {
-  // One of the two fields below are required to be set.
-  // If state key is set, then the State API should be invoked to fetch the
-  // values allowing one to restart the iterable. Otherwise the bytes for the
-  // entire iterable are represented and should be decoded using an iterable
-  // coder using the outer context.
-  StateKey state_key = 1;
-  repeated bytes iterable = 2;
-}
-
-// A request to get state for the given state key.
+// A request to get state.
 message StateGetRequest {
-  // A state key encoded in the outer context.
-  StateKey state_key = 1;
+  // (Optional) If specified, signals to the runner that the response
+  // should resume from the following continuation token.
+  //
+  // If unspecified, signals to the runner that the response should start
+  // from the beginning of the logical continuable stream.
+  bytes continuation_token = 1;
 }
 
-// A response to get state for the given state key.
+// A response to get state representing a logical byte stream which can be
+// continued using the state API.
 message StateGetResponse {
-  // A state key encoded in the outer context.
-  StateKey state_key = 1;
+  // (Optional) If specified, represents a token which can be used with the
+  // state API to get the next chunk of this logical byte stream. The end of
+  // the logical byte stream is signalled by this field being unset.
+  bytes continuation_token = 1;
 
-  oneof state {
-    // A description of an input port which will stream the state data.
-    RemoteGrpcPort remote_grpc_port = 1000;
-  }
+  // Represents a part of a logical byte stream. Elements within
+  // the logical byte stream are encoded in the nested context and
+  // concatenated together.
+  bytes data = 2;
 }
 
-// A request to append state for the given state key.
+// A request to append state.
 message StateAppendRequest {
-  // A state key encoded in the outer context.
-  StateKey state_key  = 1;
+  // Represents a part of a logical byte stream. Elements within
+  // the logical byte stream are encoded in the nested context and
+  // multiple append requests are concatenated together.
+  bytes data = 1;
 }
 
-// A response to append state for the given state key.
+// A response to append state.
 message StateAppendResponse {
-  // A state key encoded in the outer context.
-  StateKey state_key = 1;
-
-  oneof state {
-    // A description of an output port which to stream the state data to.
-    RemoteGrpcPort remote_grpc_port = 1000;
-  }
 }
 
-// A request to clear state for the given state key.
+// A request to clear state.
 message StateClearRequest {
-  // A state key encoded in the outer context.
-  StateKey state_key = 1;
 }
 
-// A response to clear state for the given state key.
+// A response to clear state.
 message StateClearResponse {
 }
 
@@ -753,7 +640,7 @@ message OAuth2ClientCredentialsGrant {
   string url = 1;
 }
 
-// A Docker container configuration for launching the SDK Fn Harness to execute
+// A Docker container configuration for launching the SDK harness to execute
 // user specified functions.
 message DockerContainer {
   // (Required) A pipeline level unique id which can be used as a reference to
@@ -769,3 +656,4 @@ message DockerContainer {
   // requiring additional configuration by a runner.
   string registry_reference = 3;
 }
+

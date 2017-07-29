@@ -23,13 +23,17 @@ import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import org.apache.beam.runners.core.GroupAlsoByWindowsDoFn;
+import org.apache.beam.runners.core.GroupAlsoByWindowsAggregators;
+import org.apache.beam.runners.core.GroupByKeyViaGroupByKeyOnly.GroupAlsoByWindow;
 import org.apache.beam.runners.core.LateDataUtils;
 import org.apache.beam.runners.core.OutputWindowedValue;
 import org.apache.beam.runners.core.ReduceFnRunner;
 import org.apache.beam.runners.core.SystemReduceFn;
 import org.apache.beam.runners.core.TimerInternals;
 import org.apache.beam.runners.core.UnsupportedSideInputReader;
+import org.apache.beam.runners.core.construction.TriggerTranslation;
+import org.apache.beam.runners.core.metrics.CounterCell;
+import org.apache.beam.runners.core.metrics.MetricsContainerImpl;
 import org.apache.beam.runners.core.triggers.ExecutableTriggerStateMachine;
 import org.apache.beam.runners.core.triggers.TriggerStateMachines;
 import org.apache.beam.runners.spark.SparkPipelineOptions;
@@ -42,18 +46,17 @@ import org.apache.beam.runners.spark.util.GlobalWatermarkHolder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.coders.KvCoder;
-import org.apache.beam.sdk.transforms.Aggregator;
-import org.apache.beam.sdk.transforms.Combine;
-import org.apache.beam.sdk.transforms.Sum;
+import org.apache.beam.sdk.metrics.MetricName;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.transforms.windowing.Triggers;
 import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.util.WindowedValue.FullWindowedValueCoder;
-import org.apache.beam.sdk.util.WindowingStrategy;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowingStrategy;
 import org.apache.spark.Partitioner;
+import org.apache.spark.api.java.JavaPairRDD;
+import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext$;
 import org.apache.spark.api.java.function.FlatMapFunction;
 import org.apache.spark.api.java.function.Function;
@@ -65,7 +68,6 @@ import org.apache.spark.streaming.dstream.PairDStreamFunctions;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import scala.Function1;
 import scala.Option;
 import scala.Tuple2;
@@ -75,7 +77,7 @@ import scala.reflect.ClassTag;
 import scala.runtime.AbstractFunction1;
 
 /**
- * An implementation of {@link org.apache.beam.runners.core.GroupAlsoByWindowViaWindowSetDoFn}
+ * An implementation of {@link GroupAlsoByWindow}
  * logic for grouping by windows and controlling trigger firings and pane accumulation.
  *
  * <p>This implementation is a composite of Spark transformations revolving around state management
@@ -102,13 +104,15 @@ public class SparkGroupAlsoByWindowViaWindowSet {
 
   public static <K, InputT, W extends BoundedWindow>
       JavaDStream<WindowedValue<KV<K, Iterable<InputT>>>> groupAlsoByWindow(
-          JavaDStream<WindowedValue<KV<K, Iterable<WindowedValue<InputT>>>>> inputDStream,
+          final JavaDStream<WindowedValue<KV<K, Iterable<WindowedValue<InputT>>>>> inputDStream,
           final Coder<K> keyCoder,
           final Coder<WindowedValue<InputT>> wvCoder,
           final WindowingStrategy<?, W> windowingStrategy,
           final SparkRuntimeContext runtimeContext,
           final List<Integer> sourceIds) {
 
+    final long batchDurationMillis =
+        runtimeContext.getPipelineOptions().as(SparkPipelineOptions.class).getBatchIntervalMillis();
     final IterableCoder<WindowedValue<InputT>> itrWvCoder = IterableCoder.of(wvCoder);
     final Coder<InputT> iCoder = ((FullWindowedValueCoder<InputT>) wvCoder).getValueCoder();
     final Coder<? extends BoundedWindow> wCoder =
@@ -135,12 +139,35 @@ public class SparkGroupAlsoByWindowViaWindowSet {
     //---- InputT: I
     DStream<Tuple2</*K*/ ByteArray, /*Itr<WV<I>>*/ byte[]>> pairDStream =
         inputDStream
-            .map(WindowingHelpers.<KV<K, Iterable<WindowedValue<InputT>>>>unwindowFunction())
-            .mapToPair(TranslationUtils.<K, Iterable<WindowedValue<InputT>>>toPairFunction())
-            // move to bytes and use coders for deserialization because there's a shuffle
-            // and checkpointing involved.
-            .mapToPair(CoderHelpers.toByteFunction(keyCoder, itrWvCoder))
+            .transformToPair(
+                new Function<
+                    JavaRDD<WindowedValue<KV<K, Iterable<WindowedValue<InputT>>>>>,
+                    JavaPairRDD<ByteArray, byte[]>>() {
+                  // we use mapPartitions with the RDD API because its the only available API
+                  // that allows to preserve partitioning.
+                  @Override
+                  public JavaPairRDD<ByteArray, byte[]> call(
+                      JavaRDD<WindowedValue<KV<K, Iterable<WindowedValue<InputT>>>>> rdd)
+                      throws Exception {
+                    return rdd.mapPartitions(
+                            TranslationUtils.functionToFlatMapFunction(
+                                WindowingHelpers
+                                    .<KV<K, Iterable<WindowedValue<InputT>>>>unwindowFunction()),
+                            true)
+                        .mapPartitionsToPair(
+                            TranslationUtils
+                                .<K, Iterable<WindowedValue<InputT>>>toPairFlatMapFunction(),
+                            true)
+                        // move to bytes representation and use coders for deserialization
+                        // because of checkpointing.
+                        .mapPartitionsToPair(
+                            TranslationUtils.pairFunctionToPairFlatMapFunction(
+                                CoderHelpers.toByteFunction(keyCoder, itrWvCoder)),
+                            true);
+                  }
+                })
             .dstream();
+
     PairDStreamFunctions<ByteArray, byte[]> pairDStreamFunctions =
         DStream.toPairDStreamFunctions(
         pairDStream,
@@ -183,10 +210,13 @@ public class SparkGroupAlsoByWindowViaWindowSet {
             new OutputWindowedValueHolder<>();
         // use in memory Aggregators since Spark Accumulators are not resilient
         // in stateful operators, once done with this partition.
-        final InMemoryLongSumAggregator droppedDueToClosedWindow = new InMemoryLongSumAggregator(
-            GroupAlsoByWindowsDoFn.DROPPED_DUE_TO_CLOSED_WINDOW_COUNTER);
-        final InMemoryLongSumAggregator droppedDueToLateness = new InMemoryLongSumAggregator(
-            GroupAlsoByWindowsDoFn.DROPPED_DUE_TO_LATENESS_COUNTER);
+        final MetricsContainerImpl cellProvider = new MetricsContainerImpl("cellProvider");
+        final CounterCell droppedDueToClosedWindow = cellProvider.getCounter(
+            MetricName.named(SparkGroupAlsoByWindowViaWindowSet.class,
+            GroupAlsoByWindowsAggregators.DROPPED_DUE_TO_CLOSED_WINDOW_COUNTER));
+        final CounterCell droppedDueToLateness = cellProvider.getCounter(
+            MetricName.named(SparkGroupAlsoByWindowViaWindowSet.class,
+                GroupAlsoByWindowsAggregators.DROPPED_DUE_TO_LATENESS_COUNTER));
 
         AbstractIterator<
             Tuple2</*K*/ ByteArray, Tuple2<StateAndTimers, /*WV<KV<K, Itr<I>>>*/ List<byte[]>>>>
@@ -211,7 +241,7 @@ public class SparkGroupAlsoByWindowViaWindowSet {
 
                       SparkStateInternals<K> stateInternals;
                       SparkTimerInternals timerInternals = SparkTimerInternals.forStreamFromSources(
-                          sourceIds, GlobalWatermarkHolder.get());
+                          sourceIds, GlobalWatermarkHolder.get(batchDurationMillis));
                       // get state(internals) per key.
                       if (prevStateAndTimersOpt.isEmpty()) {
                         // no previous state.
@@ -232,12 +262,11 @@ public class SparkGroupAlsoByWindowViaWindowSet {
                               windowingStrategy,
                               ExecutableTriggerStateMachine.create(
                                   TriggerStateMachines.stateMachineForTrigger(
-                                      Triggers.toProto(windowingStrategy.getTrigger()))),
+                                      TriggerTranslation.toProto(windowingStrategy.getTrigger()))),
                               stateInternals,
                               timerInternals,
                               outputHolder,
                               new UnsupportedSideInputReader("GroupAlsoByWindow"),
-                              droppedDueToClosedWindow,
                               reduceFn,
                               runtimeContext.getPipelineOptions());
 
@@ -292,15 +321,15 @@ public class SparkGroupAlsoByWindowViaWindowSet {
         };
 
         // log if there's something to log.
-        long lateDropped = droppedDueToLateness.getSum();
+        long lateDropped = droppedDueToLateness.getCumulative();
         if (lateDropped > 0) {
           LOG.info(String.format("Dropped %d elements due to lateness.", lateDropped));
-          droppedDueToLateness.zero();
+          droppedDueToLateness.inc(-droppedDueToLateness.getCumulative());
         }
-        long closedWindowDropped = droppedDueToClosedWindow.getSum();
+        long closedWindowDropped = droppedDueToClosedWindow.getCumulative();
         if (closedWindowDropped > 0) {
           LOG.info(String.format("Dropped %d elements due to closed window.", closedWindowDropped));
-          droppedDueToClosedWindow.zero();
+          droppedDueToClosedWindow.inc(-droppedDueToClosedWindow.getCumulative());
         }
 
         return scala.collection.JavaConversions.asScalaIterator(outIter);
@@ -388,44 +417,14 @@ public class SparkGroupAlsoByWindowViaWindowSet {
     }
 
     @Override
-    public <SideOutputT> void sideOutputWindowedValue(
-        TupleTag<SideOutputT> tag,
-        SideOutputT output, Instant timestamp,
+    public <AdditionalOutputT> void outputWindowedValue(
+        TupleTag<AdditionalOutputT> tag,
+        AdditionalOutputT output,
+        Instant timestamp,
         Collection<? extends BoundedWindow> windows,
         PaneInfo pane) {
-      throw new UnsupportedOperationException("Side outputs are not allowed in GroupAlsoByWindow.");
-    }
-  }
-
-  private static class InMemoryLongSumAggregator implements Aggregator<Long, Long> {
-    private final String name;
-    private long sum = 0;
-
-    public void zero() {
-      sum = 0;
-    }
-
-    public long getSum() {
-      return sum;
-    }
-
-    InMemoryLongSumAggregator(String name) {
-      this.name = name;
-    }
-
-    @Override
-    public void addValue(Long value) {
-      sum += value;
-    }
-
-    @Override
-    public String getName() {
-      return name;
-    }
-
-    @Override
-    public Combine.CombineFn<Long, ?, Long> getCombineFn() {
-      return Sum.ofLongs();
+      throw new UnsupportedOperationException(
+          "Tagged outputs are not allowed in GroupAlsoByWindow.");
     }
   }
 }

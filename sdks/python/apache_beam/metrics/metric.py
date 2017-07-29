@@ -30,6 +30,8 @@ from apache_beam.metrics.execution import MetricsEnvironment
 from apache_beam.metrics.metricbase import Counter, Distribution
 from apache_beam.metrics.metricbase import MetricName
 
+__all__ = ['Metrics', 'MetricsFilter']
+
 
 class Metrics(object):
   """Lets users create/access metric objects during pipeline execution."""
@@ -103,8 +105,7 @@ class MetricResults(object):
         (filter.names and
          metric_key.metric.name in filter.names)):
       return True
-    else:
-      return False
+    return False
 
   @staticmethod
   def _matches_sub_path(actual_scope, filter_scope):
@@ -117,8 +118,7 @@ class MetricResults(object):
       return False  # The first entry was not exactly matched
     elif end_pos != len(actual_scope) and actual_scope[end_pos] != '/':
       return False  # The last entry was not exactly matched
-    else:
-      return True
+    return True
 
   @staticmethod
   def _matches_scope(filter, metric_key):
@@ -139,8 +139,7 @@ class MetricResults(object):
     if (MetricResults._matches_name(filter, metric_key) and
         MetricResults._matches_scope(filter, metric_key)):
       return True
-    else:
-      return False
+    return False
 
   def query(self, filter=None):
     raise NotImplementedError
@@ -148,6 +147,8 @@ class MetricResults(object):
 
 class MetricsFilter(object):
   """Simple object to filter metrics results.
+
+  This class is experimental. No backwards-compatibility guarantees.
 
   If filters by matching a result's step-namespace-name with three internal
   sets. No execution/matching logic is added to this object, so that it may

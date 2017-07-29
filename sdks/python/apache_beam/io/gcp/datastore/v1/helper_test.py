@@ -16,6 +16,9 @@
 #
 
 """Tests for datastore helper."""
+import errno
+import random
+from socket import error as SocketError
 import sys
 import unittest
 
@@ -23,7 +26,7 @@ from mock import MagicMock
 
 from apache_beam.io.gcp.datastore.v1 import fake_datastore
 from apache_beam.io.gcp.datastore.v1 import helper
-from apache_beam.tests.test_utils import patch_retry
+from apache_beam.testing.test_utils import patch_retry
 
 
 # Protect against environments where apitools library is not available.
@@ -33,6 +36,7 @@ try:
   from google.cloud.proto.datastore.v1 import entity_pb2
   from google.cloud.proto.datastore.v1 import query_pb2
   from google.cloud.proto.datastore.v1.entity_pb2 import Key
+  from google.rpc import code_pb2
   from googledatastore.connection import RPCError
   from googledatastore import helper as datastore_helper
 except ImportError:
@@ -48,20 +52,33 @@ class HelperTest(unittest.TestCase):
     self._query = query_pb2.Query()
     self._query.kind.add().name = 'dummy_kind'
     patch_retry(self, helper)
+    self._retriable_errors = [
+        RPCError("dummy", code_pb2.INTERNAL, "failed"),
+        SocketError(errno.ECONNRESET, "Connection Reset"),
+        SocketError(errno.ETIMEDOUT, "Timed out")
+    ]
 
-  def permanent_datastore_failure(self, req):
-    raise RPCError("dummy", 500, "failed")
+    self._non_retriable_errors = [
+        RPCError("dummy", code_pb2.UNAUTHENTICATED, "failed"),
+        SocketError(errno.EADDRNOTAVAIL, "Address not available")
+    ]
 
-  def transient_datastore_failure(self, req):
+  def permanent_retriable_datastore_failure(self, req):
+    raise RPCError("dummy", code_pb2.UNAVAILABLE, "failed")
+
+  def transient_retriable_datastore_failure(self, req):
     if self._transient_fail_count:
       self._transient_fail_count -= 1
-      raise RPCError("dummy", 500, "failed")
+      raise random.choice(self._retriable_errors)
     else:
       return datastore_pb2.RunQueryResponse()
 
+  def non_retriable_datastore_failure(self, req):
+    raise random.choice(self._non_retriable_errors)
+
   def test_query_iterator(self):
     self._mock_datastore.run_query.side_effect = (
-        self.permanent_datastore_failure)
+        self.permanent_retriable_datastore_failure)
     query_iterator = helper.QueryIterator("project", None, self._query,
                                           self._mock_datastore)
     self.assertRaises(RPCError, iter(query_iterator).next)
@@ -69,16 +86,25 @@ class HelperTest(unittest.TestCase):
 
   def test_query_iterator_with_transient_failures(self):
     self._mock_datastore.run_query.side_effect = (
-        self.transient_datastore_failure)
+        self.transient_retriable_datastore_failure)
     query_iterator = helper.QueryIterator("project", None, self._query,
                                           self._mock_datastore)
-    fail_count = 2
+    fail_count = 5
     self._transient_fail_count = fail_count
     for _ in query_iterator:
       pass
 
     self.assertEqual(fail_count + 1,
                      len(self._mock_datastore.run_query.call_args_list))
+
+  def test_query_iterator_with_non_retriable_failures(self):
+    self._mock_datastore.run_query.side_effect = (
+        self.non_retriable_datastore_failure)
+    query_iterator = helper.QueryIterator("project", None, self._query,
+                                          self._mock_datastore)
+    self.assertRaises(tuple(map(type, self._non_retriable_errors)),
+                      iter(query_iterator).next)
+    self.assertEqual(1, len(self._mock_datastore.run_query.call_args_list))
 
   def test_query_iterator_with_single_batch(self):
     num_entities = 100

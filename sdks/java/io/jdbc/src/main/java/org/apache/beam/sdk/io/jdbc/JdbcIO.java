@@ -21,17 +21,19 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 import com.google.auto.value.AutoValue;
-
 import java.io.Serializable;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.Random;
-
 import javax.annotation.Nullable;
 import javax.sql.DataSource;
-
+import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
@@ -54,15 +56,13 @@ import org.apache.commons.dbcp2.BasicDataSource;
  * <p>JdbcIO source returns a bounded collection of {@code T} as a {@code PCollection<T>}. T is the
  * type returned by the provided {@link RowMapper}.
  *
- * <p>To configure the JDBC source, you have to provide a {@link DataSourceConfiguration} using
- * {@link DataSourceConfiguration#create(DataSource)} or
- * {@link DataSourceConfiguration#create(String, String)} with either a
- * {@link DataSource} (which must be {@link Serializable}) or the parameters needed to create it
- * (driver class name and url). Optionally, {@link DataSourceConfiguration#withUsername(String)} and
- * {@link DataSourceConfiguration#withPassword(String)} allows you to define DataSource username
- * and password.
- * For example:
+ * <p>To configure the JDBC source, you have to provide a {@link DataSourceConfiguration} using<br>
+ * 1. {@link DataSourceConfiguration#create(DataSource)}(which must be {@link Serializable});<br>
+ * 2. or {@link DataSourceConfiguration#create(String, String)}(driver class name and url).
+ * Optionally, {@link DataSourceConfiguration#withUsername(String)} and
+ * {@link DataSourceConfiguration#withPassword(String)} allows you to define username and password.
  *
+ * <p>For example:
  * <pre>{@code
  * pipeline.apply(JdbcIO.<KV<Integer, String>>read()
  *   .withDataSourceConfiguration(JdbcIO.DataSourceConfiguration.create(
@@ -70,11 +70,13 @@ import org.apache.commons.dbcp2.BasicDataSource;
  *        .withUsername("username")
  *        .withPassword("password"))
  *   .withQuery("select id,name from Person")
+ *   .withCoder(KvCoder.of(BigEndianIntegerCoder.of(), StringUtf8Coder.of()))
  *   .withRowMapper(new JdbcIO.RowMapper<KV<Integer, String>>() {
  *     public KV<Integer, String> mapRow(ResultSet resultSet) throws Exception {
  *       return KV.of(resultSet.getInt(1), resultSet.getString(2));
  *     }
  *   })
+ * );
  * }</pre>
  *
  * <p>Query parameters can be configured using a user-provided {@link StatementPreparator}.
@@ -86,6 +88,7 @@ import org.apache.commons.dbcp2.BasicDataSource;
  *       "com.mysql.jdbc.Driver", "jdbc:mysql://hostname:3306/mydb",
  *       "username", "password"))
  *   .withQuery("select id,name from Person where name = ?")
+ *   .withCoder(KvCoder.of(BigEndianIntegerCoder.of(), StringUtf8Coder.of()))
  *   .withStatementPreparator(new JdbcIO.StatementPreparator() {
  *     public void setParameters(PreparedStatement preparedStatement) throws Exception {
  *       preparedStatement.setString(1, "Darwin");
@@ -96,6 +99,7 @@ import org.apache.commons.dbcp2.BasicDataSource;
  *       return KV.of(resultSet.getInt(1), resultSet.getString(2));
  *     }
  *   })
+ * );
  * }</pre>
  *
  * <h3>Writing to JDBC datasource</h3>
@@ -116,11 +120,13 @@ import org.apache.commons.dbcp2.BasicDataSource;
  *          .withPassword("password"))
  *      .withStatement("insert into Person values(?, ?)")
  *      .withPreparedStatementSetter(new JdbcIO.PreparedStatementSetter<KV<Integer, String>>() {
- *        public void setParameters(KV<Integer, String> element, PreparedStatement query) {
+ *        public void setParameters(KV<Integer, String> element, PreparedStatement query)
+ *          throws SQLException {
  *          query.setInt(1, kv.getKey());
  *          query.setString(2, kv.getValue());
  *        }
  *      })
+ *    );
  * }</pre>
  *
  * <p>NB: in case of transient failures, Beam runners may execute parts of JdbcIO.Write multiple
@@ -129,6 +135,7 @@ import org.apache.commons.dbcp2.BasicDataSource;
  * Consider using <a href="https://en.wikipedia.org/wiki/Merge_(SQL)">MERGE ("upsert")
  * statements</a> supported by your database instead.
  */
+@Experimental(Experimental.Kind.SOURCE_SINK)
 public class JdbcIO {
   /**
    * Read data from a JDBC datasource.
@@ -168,6 +175,7 @@ public class JdbcIO {
     @Nullable abstract String getUrl();
     @Nullable abstract String getUsername();
     @Nullable abstract String getPassword();
+    @Nullable abstract String getConnectionProperties();
     @Nullable abstract DataSource getDataSource();
 
     abstract Builder builder();
@@ -178,6 +186,7 @@ public class JdbcIO {
       abstract Builder setUrl(String url);
       abstract Builder setUsername(String username);
       abstract Builder setPassword(String password);
+      abstract Builder setConnectionProperties(String connectionProperties);
       abstract Builder setDataSource(DataSource dataSource);
       abstract DataSourceConfiguration build();
     }
@@ -211,6 +220,20 @@ public class JdbcIO {
       return builder().setPassword(password).build();
     }
 
+    /**
+     * Sets the connection properties passed to driver.connect(...).
+     * Format of the string must be [propertyName=property;]*
+     *
+     * <p>NOTE - The "user" and "password" properties can be add via {@link #withUsername(String)},
+     * {@link #withPassword(String)}, so they do not need to be included here.
+     */
+    public DataSourceConfiguration withConnectionProperties(String connectionProperties) {
+      checkArgument(connectionProperties != null, "DataSourceConfiguration.create(driver, url)"
+          + ".withConnectionProperties(connectionProperties) "
+          + "called with null connectionProperties");
+      return builder().setConnectionProperties(connectionProperties).build();
+    }
+
     private void populateDisplayData(DisplayData.Builder builder) {
       if (getDataSource() != null) {
         builder.addIfNotNull(DisplayData.item("dataSource", getDataSource().getClass().getName()));
@@ -221,20 +244,22 @@ public class JdbcIO {
       }
     }
 
-    Connection getConnection() throws Exception {
+    DataSource buildDatasource() throws Exception{
       if (getDataSource() != null) {
-        return (getUsername() != null)
-            ? getDataSource().getConnection(getUsername(), getPassword())
-            : getDataSource().getConnection();
+        return getDataSource();
       } else {
         BasicDataSource basicDataSource = new BasicDataSource();
         basicDataSource.setDriverClassName(getDriverClassName());
         basicDataSource.setUrl(getUrl());
         basicDataSource.setUsername(getUsername());
         basicDataSource.setPassword(getPassword());
-        return basicDataSource.getConnection();
+        if (getConnectionProperties() != null) {
+          basicDataSource.setConnectionProperties(getConnectionProperties());
+        }
+        return basicDataSource;
       }
     }
+
   }
 
   /**
@@ -249,7 +274,7 @@ public class JdbcIO {
   @AutoValue
   public abstract static class Read<T> extends PTransform<PBegin, PCollection<T>> {
     @Nullable abstract DataSourceConfiguration getDataSourceConfiguration();
-    @Nullable abstract String getQuery();
+    @Nullable abstract ValueProvider<String> getQuery();
     @Nullable abstract StatementPreparator getStatementPreparator();
     @Nullable abstract RowMapper<T> getRowMapper();
     @Nullable abstract Coder<T> getCoder();
@@ -259,7 +284,7 @@ public class JdbcIO {
     @AutoValue.Builder
     abstract static class Builder<T> {
       abstract Builder<T> setDataSourceConfiguration(DataSourceConfiguration config);
-      abstract Builder<T> setQuery(String query);
+      abstract Builder<T> setQuery(ValueProvider<String> query);
       abstract Builder<T> setStatementPreparator(StatementPreparator statementPreparator);
       abstract Builder<T> setRowMapper(RowMapper<T> rowMapper);
       abstract Builder<T> setCoder(Coder<T> coder);
@@ -274,10 +299,15 @@ public class JdbcIO {
 
     public Read<T> withQuery(String query) {
       checkArgument(query != null, "JdbcIO.read().withQuery(query) called with null query");
+      return withQuery(ValueProvider.StaticValueProvider.of(query));
+    }
+
+    public Read<T> withQuery(ValueProvider<String> query) {
+      checkArgument(query != null, "JdbcIO.read().withQuery(query) called with null query");
       return toBuilder().setQuery(query).build();
     }
 
-    public Read<T> withStatementPrepator(StatementPreparator statementPreparator) {
+    public Read<T> withStatementPreparator(StatementPreparator statementPreparator) {
       checkArgument(statementPreparator != null,
           "JdbcIO.read().withStatementPreparator(statementPreparator) called "
               + "with null statementPreparator");
@@ -298,12 +328,8 @@ public class JdbcIO {
     @Override
     public PCollection<T> expand(PBegin input) {
       return input
-          .apply(Create.of(getQuery()))
+          .apply(Create.ofProvider(getQuery(), StringUtf8Coder.of()))
           .apply(ParDo.of(new ReadFn<>(this))).setCoder(getCoder())
-          // generate a random key followed by a GroupByKey and then ungroup
-          // to prevent fusion
-          // see https://cloud.google.com/dataflow/service/dataflow-service-desc#preventing-fusion
-          // for details
           .apply(ParDo.of(new DoFn<T, KV<Integer, T>>() {
             private Random random;
             @Setup
@@ -321,7 +347,7 @@ public class JdbcIO {
     }
 
     @Override
-    public void validate(PBegin input) {
+    public void validate(PipelineOptions options) {
       checkState(getQuery() != null,
           "JdbcIO.read() requires a query to be set via withQuery(query)");
       checkState(getRowMapper() != null,
@@ -345,6 +371,7 @@ public class JdbcIO {
     /** A {@link DoFn} executing the SQL query to read from the database. */
     static class ReadFn<T> extends DoFn<String, T> {
       private JdbcIO.Read<T> spec;
+      private DataSource dataSource;
       private Connection connection;
 
       private ReadFn(Read<T> spec) {
@@ -353,7 +380,8 @@ public class JdbcIO {
 
       @Setup
       public void setup() throws Exception {
-        connection = spec.getDataSourceConfiguration().getConnection();
+        dataSource = spec.getDataSourceConfiguration().buildDatasource();
+        connection = dataSource.getConnection();
       }
 
       @ProcessElement
@@ -373,8 +401,9 @@ public class JdbcIO {
 
       @Teardown
       public void teardown() throws Exception {
-        if (connection != null) {
-          connection.close();
+        connection.close();
+        if (dataSource instanceof AutoCloseable) {
+          ((AutoCloseable) dataSource).close();
         }
       }
     }
@@ -423,7 +452,7 @@ public class JdbcIO {
     }
 
     @Override
-    public void validate(PCollection<T> input) {
+    public void validate(PipelineOptions options) {
       checkArgument(getDataSourceConfiguration() != null,
           "JdbcIO.write() requires a configuration to be set via "
               + ".withDataSourceConfiguration(configuration)");
@@ -439,6 +468,7 @@ public class JdbcIO {
 
       private final Write<T> spec;
 
+      private DataSource dataSource;
       private Connection connection;
       private PreparedStatement preparedStatement;
       private int batchCount;
@@ -449,13 +479,14 @@ public class JdbcIO {
 
       @Setup
       public void setup() throws Exception {
-        connection = spec.getDataSourceConfiguration().getConnection();
+        dataSource = spec.getDataSourceConfiguration().buildDatasource();
+        connection = dataSource.getConnection();
         connection.setAutoCommit(false);
         preparedStatement = connection.prepareStatement(spec.getStatement());
       }
 
       @StartBundle
-      public void startBundle(Context context) {
+      public void startBundle() {
         batchCount = 0;
       }
 
@@ -470,12 +501,16 @@ public class JdbcIO {
         batchCount++;
 
         if (batchCount >= DEFAULT_BATCH_SIZE) {
-          finishBundle(context);
+          executeBatch();
         }
       }
 
       @FinishBundle
-      public void finishBundle(Context context) throws Exception {
+      public void finishBundle() throws Exception {
+        executeBatch();
+      }
+
+      private void executeBatch() throws SQLException {
         if (batchCount > 0) {
           preparedStatement.executeBatch();
           connection.commit();
@@ -492,6 +527,9 @@ public class JdbcIO {
         } finally {
           if (connection != null) {
             connection.close();
+          }
+          if (dataSource instanceof AutoCloseable) {
+            ((AutoCloseable) dataSource).close();
           }
         }
       }

@@ -18,42 +18,37 @@
 
 package org.apache.beam.runners.spark;
 
+import static org.apache.beam.runners.core.metrics.MetricsContainerStepMap.asAttemptedOnlyMetricResults;
+
 import java.io.IOException;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import org.apache.beam.runners.spark.aggregators.SparkAggregators;
-import org.apache.beam.runners.spark.metrics.SparkMetricResults;
+import org.apache.beam.runners.spark.metrics.MetricsAccumulator;
 import org.apache.beam.runners.spark.translation.SparkContextFactory;
-import org.apache.beam.sdk.AggregatorValues;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.metrics.MetricResults;
-import org.apache.beam.sdk.transforms.Aggregator;
 import org.apache.beam.sdk.util.UserCodeException;
 import org.apache.spark.SparkException;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.streaming.api.java.JavaStreamingContext;
 import org.joda.time.Duration;
 
-/**
- * Represents a Spark pipeline execution result.
- */
+/** Represents a Spark pipeline execution result. */
 public abstract class SparkPipelineResult implements PipelineResult {
 
   protected final Future pipelineExecution;
   protected JavaSparkContext javaSparkContext;
   protected PipelineResult.State state;
-  private final SparkMetricResults metricResults = new SparkMetricResults();
 
-  SparkPipelineResult(final Future<?> pipelineExecution,
-                      final JavaSparkContext javaSparkContext) {
+  SparkPipelineResult(final Future<?> pipelineExecution, final JavaSparkContext javaSparkContext) {
     this.pipelineExecution = pipelineExecution;
     this.javaSparkContext = javaSparkContext;
     // pipelineExecution is expected to have started executing eagerly.
-    state = State.RUNNING;
+    this.state = State.RUNNING;
   }
 
   private static RuntimeException runtimeExceptionFrom(final Throwable e) {
@@ -82,15 +77,6 @@ public abstract class SparkPipelineResult implements PipelineResult {
   protected abstract State awaitTermination(Duration duration)
       throws TimeoutException, ExecutionException, InterruptedException;
 
-  public <T> T getAggregatorValue(final String name, final Class<T> resultType) {
-    return SparkAggregators.valueOf(name, resultType);
-  }
-
-  @Override
-  public <T> AggregatorValues<T> getAggregatorValues(final Aggregator<?, T> aggregator) {
-    return SparkAggregators.valueOf(aggregator);
-  }
-
   @Override
   public PipelineResult.State getState() {
     return state;
@@ -104,16 +90,15 @@ public abstract class SparkPipelineResult implements PipelineResult {
   @Override
   public State waitUntilFinish(final Duration duration) {
     try {
-      state = awaitTermination(duration);
+      State finishState = awaitTermination(duration);
+      offerNewState(finishState);
     } catch (final TimeoutException e) {
       // ignore.
     } catch (final ExecutionException e) {
-      state = PipelineResult.State.FAILED;
-      stop();
+      offerNewState(PipelineResult.State.FAILED);
       throw beamExceptionFrom(e.getCause());
     } catch (final Exception e) {
-      state = PipelineResult.State.FAILED;
-      stop();
+      offerNewState(PipelineResult.State.FAILED);
       throw beamExceptionFrom(e);
     }
 
@@ -122,26 +107,20 @@ public abstract class SparkPipelineResult implements PipelineResult {
 
   @Override
   public MetricResults metrics() {
-    return metricResults;
+    return asAttemptedOnlyMetricResults(
+        MetricsAccumulator.getInstance().value());
   }
 
   @Override
   public PipelineResult.State cancel() throws IOException {
-    if (state != null && !state.isTerminal()) {
-      stop();
-      state = PipelineResult.State.CANCELLED;
-    }
-
+    offerNewState(PipelineResult.State.CANCELLED);
     return state;
   }
 
-  /**
-   * Represents the result of running a batch pipeline.
-   */
+  /** Represents the result of running a batch pipeline. */
   static class BatchMode extends SparkPipelineResult {
 
-    BatchMode(final Future<?> pipelineExecution,
-              final JavaSparkContext javaSparkContext) {
+    BatchMode(final Future<?> pipelineExecution, final JavaSparkContext javaSparkContext) {
       super(pipelineExecution, javaSparkContext);
     }
 
@@ -149,7 +128,7 @@ public abstract class SparkPipelineResult implements PipelineResult {
     protected void stop() {
       SparkContextFactory.stopSparkContext(javaSparkContext);
       if (Objects.equals(state, State.RUNNING)) {
-        state = State.STOPPED;
+        this.state = State.STOPPED;
       }
     }
 
@@ -161,15 +140,13 @@ public abstract class SparkPipelineResult implements PipelineResult {
     }
   }
 
-  /**
-   * Represents a streaming Spark pipeline result.
-   */
+  /** Represents a streaming Spark pipeline result. */
   static class StreamingMode extends SparkPipelineResult {
 
     private final JavaStreamingContext javaStreamingContext;
 
-    StreamingMode(final Future<?> pipelineExecution,
-                  final JavaStreamingContext javaStreamingContext) {
+    StreamingMode(
+        final Future<?> pipelineExecution, final JavaStreamingContext javaStreamingContext) {
       super(pipelineExecution, javaStreamingContext.sparkContext());
       this.javaStreamingContext = javaStreamingContext;
     }
@@ -181,38 +158,44 @@ public abstract class SparkPipelineResult implements PipelineResult {
       // calling the StreamingContext's waiter with 0 msec will throw any error that might have
       // been thrown during the "grace period".
       try {
-        javaStreamingContext.awaitTermination(0);
+        javaStreamingContext.awaitTerminationOrTimeout(0);
       } catch (Exception e) {
         throw beamExceptionFrom(e);
       } finally {
         SparkContextFactory.stopSparkContext(javaSparkContext);
         if (Objects.equals(state, State.RUNNING)) {
-          state = State.STOPPED;
+          this.state = State.STOPPED;
         }
       }
     }
 
     @Override
-    protected State awaitTermination(final Duration duration) throws ExecutionException,
-        InterruptedException {
+    protected State awaitTermination(final Duration duration)
+        throws ExecutionException, InterruptedException {
       pipelineExecution.get(); // execution is asynchronous anyway so no need to time-out.
       javaStreamingContext.awaitTerminationOrTimeout(duration.getMillis());
 
-      State terminationState = null;
+      State terminationState;
       switch (javaStreamingContext.getState()) {
-         case ACTIVE:
-           terminationState = State.RUNNING;
-           break;
-         case STOPPED:
-           terminationState = State.DONE;
-           break;
-         default:
-           state = State.UNKNOWN;
-           break;
-       }
-       return terminationState;
+        case ACTIVE:
+          terminationState = State.RUNNING;
+          break;
+        case STOPPED:
+          terminationState = State.DONE;
+          break;
+        default:
+          terminationState = State.UNKNOWN;
+          break;
+      }
+      return terminationState;
     }
-
   }
 
+  private void offerNewState(State newState) {
+    State oldState = this.state;
+    this.state = newState;
+    if (!oldState.isTerminal() && newState.isTerminal()) {
+      stop();
+    }
+  }
 }

@@ -45,6 +45,8 @@ import com.google.common.collect.Multimap;
 import com.google.common.collect.MutableClassToInstanceMap;
 import java.beans.PropertyDescriptor;
 import java.io.IOException;
+import java.io.NotSerializableException;
+import java.io.Serializable;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -87,8 +89,7 @@ import org.apache.beam.sdk.util.common.ReflectHelpers;
  * {@link PipelineOptions#as(Class)}.
  */
 @ThreadSafe
-class ProxyInvocationHandler implements InvocationHandler {
-  private static final ObjectMapper MAPPER = new ObjectMapper();
+class ProxyInvocationHandler implements InvocationHandler, Serializable {
   /**
    * No two instances of this class are considered equivalent hence we generate a random hash code.
    */
@@ -163,6 +164,21 @@ class ProxyInvocationHandler implements InvocationHandler {
     }
     throw new RuntimeException("Unknown method [" + method + "] invoked with args ["
         + Arrays.toString(args) + "].");
+  }
+
+  public String getOptionName(Method method) {
+    return gettersToPropertyNames.get(method.getName());
+  }
+
+  private void writeObject(java.io.ObjectOutputStream stream)
+      throws IOException {
+    throw new NotSerializableException(
+        "PipelineOptions objects are not serializable and should not be embedded into transforms "
+            + "(did you capture a PipelineOptions object in a field or in an anonymous class?). "
+            + "Instead, if you're using a DoFn, access PipelineOptions at runtime "
+            + "via ProcessContext/StartBundleContext/FinishBundleContext.getPipelineOptions(), "
+            + "or pre-extract necessary fields from PipelineOptions "
+            + "at pipeline construction time.");
   }
 
   /**
@@ -480,9 +496,10 @@ class ProxyInvocationHandler implements InvocationHandler {
    */
   private Object getValueFromJson(String propertyName, Method method) {
     try {
-      JavaType type = MAPPER.getTypeFactory().constructType(method.getGenericReturnType());
+      JavaType type = PipelineOptionsFactory.MAPPER.getTypeFactory()
+          .constructType(method.getGenericReturnType());
       JsonNode jsonNode = jsonOptions.get(propertyName);
-      return MAPPER.readValue(jsonNode.toString(), type);
+      return PipelineOptionsFactory.MAPPER.readValue(jsonNode.toString(), type);
     } catch (IOException e) {
       throw new RuntimeException("Unable to parse representation", e);
     }
@@ -645,7 +662,8 @@ class ProxyInvocationHandler implements InvocationHandler {
         DisplayData displayData = DisplayData.from(value);
         for (DisplayData.Item item : displayData.items()) {
           @SuppressWarnings("unchecked")
-          Map<String, Object> serializedItem = MAPPER.convertValue(item, Map.class);
+          Map<String, Object> serializedItem =
+              PipelineOptionsFactory.MAPPER.convertValue(item, Map.class);
           serializedDisplayData.add(serializedItem);
         }
 
@@ -700,10 +718,11 @@ class ProxyInvocationHandler implements InvocationHandler {
       // Attempt to serialize and deserialize each property.
       for (Map.Entry<String, BoundValue> entry : options.entrySet()) {
         try {
-          String serializedValue = MAPPER.writeValueAsString(entry.getValue().getValue());
-          JavaType type = MAPPER.getTypeFactory()
+          String serializedValue =
+              PipelineOptionsFactory.MAPPER.writeValueAsString(entry.getValue().getValue());
+          JavaType type = PipelineOptionsFactory.MAPPER.getTypeFactory()
               .constructType(propertyToReturnType.get(entry.getKey()));
-          MAPPER.readValue(serializedValue, type);
+          PipelineOptionsFactory.MAPPER.readValue(serializedValue, type);
         } catch (Exception e) {
           throw new IOException(String.format(
               "Failed to serialize and deserialize property '%s' with value '%s'",

@@ -23,6 +23,8 @@ encode many elements with minimal overhead.
 
 This module may be optionally compiled with Cython, using the corresponding
 coder_impl.pxd file for type hints.
+
+For internal use only; no backwards-compatibility guarantees.
 """
 from types import NoneType
 
@@ -50,6 +52,7 @@ except ImportError:
 
 
 class CoderImpl(object):
+  """For internal use only; no backwards-compatibility guarantees."""
 
   def encode_to_stream(self, value, stream, nested):
     """Reads object from potentially-nested encoding in stream."""
@@ -97,7 +100,9 @@ class CoderImpl(object):
 
 
 class SimpleCoderImpl(CoderImpl):
-  """Subclass of CoderImpl implementing stream methods using encode/decode."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  Subclass of CoderImpl implementing stream methods using encode/decode."""
 
   def encode_to_stream(self, value, stream, nested):
     """Reads object from potentially-nested encoding in stream."""
@@ -109,7 +114,9 @@ class SimpleCoderImpl(CoderImpl):
 
 
 class StreamCoderImpl(CoderImpl):
-  """Subclass of CoderImpl implementing encode/decode using stream methods."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  Subclass of CoderImpl implementing encode/decode using stream methods."""
 
   def encode(self, value):
     out = create_OutputStream()
@@ -127,7 +134,9 @@ class StreamCoderImpl(CoderImpl):
 
 
 class CallbackCoderImpl(CoderImpl):
-  """A CoderImpl that calls back to the _impl methods on the Coder itself.
+  """For internal use only; no backwards-compatibility guarantees.
+
+  A CoderImpl that calls back to the _impl methods on the Coder itself.
 
   This is the default implementation used if Coder._get_impl()
   is not overwritten.
@@ -161,11 +170,12 @@ class CallbackCoderImpl(CoderImpl):
     if isinstance(value, observable.ObservableMixin):
       # CallbackCoderImpl can presumably encode the elements too.
       return 1, [(value, self)]
-    else:
-      return self.estimate_size(value, nested), []
+
+    return self.estimate_size(value, nested), []
 
 
 class DeterministicFastPrimitivesCoderImpl(CoderImpl):
+  """For internal use only; no backwards-compatibility guarantees."""
 
   def __init__(self, coder, step_label):
     self._underlying_coder = coder
@@ -208,6 +218,7 @@ class DeterministicFastPrimitivesCoderImpl(CoderImpl):
 
 
 class ProtoCoderImpl(SimpleCoderImpl):
+  """For internal use only; no backwards-compatibility guarantees."""
 
   def __init__(self, proto_message_type):
     self.proto_message_type = proto_message_type
@@ -235,6 +246,7 @@ SET_TYPE = 8
 
 
 class FastPrimitivesCoderImpl(StreamCoderImpl):
+  """For internal use only; no backwards-compatibility guarantees."""
 
   def __init__(self, fallback_coder_impl):
     self.fallback_coder_impl = fallback_coder_impl
@@ -243,10 +255,10 @@ class FastPrimitivesCoderImpl(StreamCoderImpl):
     if isinstance(value, observable.ObservableMixin):
       # FastPrimitivesCoderImpl can presumably encode the elements too.
       return 1, [(value, self)]
-    else:
-      out = ByteCountingOutputStream()
-      self.encode_to_stream(value, out, nested)
-      return out.get_count(), []
+
+    out = ByteCountingOutputStream()
+    self.encode_to_stream(value, out, nested)
+    return out.get_count(), []
 
   def encode_to_stream(self, value, stream, nested):
     t = type(value)
@@ -304,8 +316,7 @@ class FastPrimitivesCoderImpl(StreamCoderImpl):
         return vlist
       elif t == TUPLE_TYPE:
         return tuple(vlist)
-      else:
-        return set(vlist)
+      return set(vlist)
     elif t == DICT_TYPE:
       vlen = stream.read_var_int64()
       v = {}
@@ -315,12 +326,14 @@ class FastPrimitivesCoderImpl(StreamCoderImpl):
       return v
     elif t == BOOL_TYPE:
       return not not stream.read_byte()
-    else:
-      return self.fallback_coder_impl.decode_from_stream(stream, nested)
+
+    return self.fallback_coder_impl.decode_from_stream(stream, nested)
 
 
 class BytesCoderImpl(CoderImpl):
-  """A coder for bytes/str objects."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  A coder for bytes/str objects."""
 
   def encode_to_stream(self, value, out, nested):
     out.write(value, nested)
@@ -337,6 +350,7 @@ class BytesCoderImpl(CoderImpl):
 
 
 class FloatCoderImpl(StreamCoderImpl):
+  """For internal use only; no backwards-compatibility guarantees."""
 
   def encode_to_stream(self, value, out, nested):
     out.write_bigendian_double(value)
@@ -350,6 +364,8 @@ class FloatCoderImpl(StreamCoderImpl):
 
 
 class IntervalWindowCoderImpl(StreamCoderImpl):
+  """For internal use only; no backwards-compatibility guarantees."""
+
   # TODO: Fn Harness only supports millis. Is this important enough to fix?
   def _to_normal_time(self, value):
     """Convert "lexicographically ordered unsigned" to signed."""
@@ -380,6 +396,8 @@ class IntervalWindowCoderImpl(StreamCoderImpl):
 
 
 class TimestampCoderImpl(StreamCoderImpl):
+  """For internal use only; no backwards-compatibility guarantees."""
+
   def encode_to_stream(self, value, out, nested):
     out.write_bigendian_int64(value.micros)
 
@@ -396,7 +414,9 @@ small_ints = [chr(_) for _ in range(128)]
 
 
 class VarIntCoderImpl(StreamCoderImpl):
-  """A coder for long/int objects."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  A coder for long/int objects."""
 
   def encode_to_stream(self, value, out, nested):
     out.write_var_int64(value)
@@ -408,8 +428,7 @@ class VarIntCoderImpl(StreamCoderImpl):
     ivalue = value  # type cast
     if 0 <= ivalue < len(small_ints):
       return small_ints[ivalue]
-    else:
-      return StreamCoderImpl.encode(self, value)
+    return StreamCoderImpl.encode(self, value)
 
   def decode(self, encoded):
     if len(encoded) == 1:
@@ -424,7 +443,9 @@ class VarIntCoderImpl(StreamCoderImpl):
 
 
 class SingletonCoderImpl(CoderImpl):
-  """A coder that always encodes exactly one value."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  A coder that always encodes exactly one value."""
 
   def __init__(self, value):
     self._value = value
@@ -447,7 +468,9 @@ class SingletonCoderImpl(CoderImpl):
 
 
 class AbstractComponentCoderImpl(StreamCoderImpl):
-  """CoderImpl for coders that are comprised of several component coders."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  CoderImpl for coders that are comprised of several component coders."""
 
   def __init__(self, coder_impls):
     for c in coder_impls:
@@ -509,7 +532,9 @@ class TupleCoderImpl(AbstractComponentCoderImpl):
 
 
 class SequenceCoderImpl(StreamCoderImpl):
-  """A coder for sequences.
+  """For internal use only; no backwards-compatibility guarantees.
+
+  A coder for sequences.
 
   If the length of the sequence in known we encode the length as a 32 bit
   ``int`` followed by the encoded bytes.
@@ -596,38 +621,44 @@ class SequenceCoderImpl(StreamCoderImpl):
     estimated_size += 4
     if isinstance(value, observable.ObservableMixin):
       return estimated_size, [(value, self._elem_coder)]
-    else:
-      observables = []
-      for elem in value:
-        child_size, child_observables = (
-            self._elem_coder.get_estimated_size_and_observables(
-                elem, nested=True))
-        estimated_size += child_size
-        observables += child_observables
-      # TODO: (BEAM-1537) Update to use an accurate count depending on size and
-      # count, currently we are underestimating the size by up to 10 bytes
-      # per block of data since we are not including the count prefix which
-      # occurs at most once per 64k of data and is upto 10 bytes long. The upper
-      # bound of the underestimate is 10 / 65536 ~= 0.0153% of the actual size.
-      return estimated_size, observables
+
+    observables = []
+    for elem in value:
+      child_size, child_observables = (
+          self._elem_coder.get_estimated_size_and_observables(
+              elem, nested=True))
+      estimated_size += child_size
+      observables += child_observables
+    # TODO: (BEAM-1537) Update to use an accurate count depending on size and
+    # count, currently we are underestimating the size by up to 10 bytes
+    # per block of data since we are not including the count prefix which
+    # occurs at most once per 64k of data and is upto 10 bytes long. The upper
+    # bound of the underestimate is 10 / 65536 ~= 0.0153% of the actual size.
+    return estimated_size, observables
 
 
 class TupleSequenceCoderImpl(SequenceCoderImpl):
-  """A coder for homogeneous tuple objects."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  A coder for homogeneous tuple objects."""
 
   def _construct_from_sequence(self, components):
     return tuple(components)
 
 
 class IterableCoderImpl(SequenceCoderImpl):
-  """A coder for homogeneous iterable objects."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  A coder for homogeneous iterable objects."""
 
   def _construct_from_sequence(self, components):
     return components
 
 
 class WindowedValueCoderImpl(StreamCoderImpl):
-  """A coder for windowed values."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  A coder for windowed values."""
 
   # Ensure that lexicographic ordering of the bytes corresponds to
   # chronological order of timestamps.
@@ -679,6 +710,10 @@ class WindowedValueCoderImpl(StreamCoderImpl):
       timestamp = MAX_TIMESTAMP.micros
     else:
       timestamp *= 1000
+      if timestamp > MAX_TIMESTAMP.micros:
+        timestamp = MAX_TIMESTAMP.micros
+      if timestamp < MIN_TIMESTAMP.micros:
+        timestamp = MIN_TIMESTAMP.micros
 
     windows = self._windows_coder.decode_from_stream(in_stream, True)
     # Read PaneInfo encoded byte.
@@ -715,7 +750,9 @@ class WindowedValueCoderImpl(StreamCoderImpl):
 
 
 class LengthPrefixCoderImpl(StreamCoderImpl):
-  """Coder which prefixes the length of the encoded object in the stream."""
+  """For internal use only; no backwards-compatibility guarantees.
+
+  Coder which prefixes the length of the encoded object in the stream."""
 
   def __init__(self, value_coder):
     self._value_coder = value_coder

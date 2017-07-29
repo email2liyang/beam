@@ -24,7 +24,7 @@ from hamcrest import assert_that as hc_assert_that
 from mock import Mock, patch
 
 from apache_beam.io.gcp.tests import bigquery_matcher as bq_verifier
-from apache_beam.tests.test_utils import patch_retry
+from apache_beam.testing.test_utils import patch_retry
 
 # Protect against environments where bigquery library is not available.
 # pylint: disable=wrong-import-order, wrong-import-position
@@ -53,7 +53,7 @@ class BigqueryMatcherTest(unittest.TestCase):
     matcher = bq_verifier.BigqueryMatcher(
         'mock_project',
         'mock_query',
-        'da39a3ee5e6b4b0d3255bfef95601890afd80709')
+        '59f9d6bdee30d67ea73b8aded121c3a0280f9cd8')
     hc_assert_that(self._mock_result, matcher)
 
   @patch.object(bigquery, 'Client')

@@ -22,7 +22,7 @@
   <parent>
     <groupId>org.apache.beam</groupId>
     <artifactId>beam-examples-parent</artifactId>
-    <version>0.7.0-SNAPSHOT</version>
+    <version>2.2.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
@@ -33,10 +33,6 @@
   artifact includes all Apache Beam Java SDK examples.</description>
 
   <packaging>jar</packaging>
-
-  <properties>
-    <spark.version>1.6.2</spark.version>
-  </properties>
 
   <profiles>
 
@@ -66,6 +62,12 @@
           <groupId>org.apache.beam</groupId>
           <artifactId>beam-runners-apex</artifactId>
           <scope>runtime</scope>
+          <exclusions>
+            <exclusion>
+              <groupId>javax.servlet</groupId>
+              <artifactId>servlet-api</artifactId>
+            </exclusion>
+          </exclusions>
         </dependency>
         <!--
           Apex depends on httpclient version 4.3.5, project has a transitive dependency to httpclient 4.0.1 from
@@ -95,6 +97,12 @@
           <groupId>org.apache.beam</groupId>
           <artifactId>beam-runners-flink_2.10</artifactId>
           <scope>runtime</scope>
+          <exclusions>
+            <exclusion>
+              <groupId>javax.servlet</groupId>
+              <artifactId>servlet-api</artifactId>
+            </exclusion>
+          </exclusions>
         </dependency>
       </dependencies>
     </profile>
@@ -109,15 +117,18 @@
           <scope>runtime</scope>
         </dependency>
         <dependency>
+          <groupId>org.apache.beam</groupId>
+          <artifactId>beam-sdks-java-io-hadoop-file-system</artifactId>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
           <groupId>org.apache.spark</groupId>
           <artifactId>spark-streaming_2.10</artifactId>
-          <version>${spark.version}</version>
           <scope>runtime</scope>
         </dependency>
         <dependency>
           <groupId>org.apache.spark</groupId>
           <artifactId>spark-core_2.10</artifactId>
-          <version>${spark.version}</version>
           <scope>runtime</scope>
           <exclusions>
             <exclusion>
@@ -209,6 +220,7 @@
                 <configuration>
                   <includes>
                     <include>WordCountIT.java</include>
+                    <include>WindowedWordCountIT.java</include>
                   </includes>
                   <parallel>all</parallel>
                   <threadCount>4</threadCount>
@@ -262,7 +274,32 @@
                       [
                       "--project=apache-beam-testing",
                       "--tempRoot=gs://temp-storage-for-end-to-end-tests",
-                      "--runner=org.apache.beam.runners.dataflow.testing.TestDataflowRunner"
+                      "--runner=TestDataflowRunner"
+                      ]
+                    </beamTestPipelineOptions>
+                  </systemPropertyVariables>
+                </configuration>
+              </execution>
+              <execution>
+                <id>dataflow-runner-integration-tests-streaming</id>
+                <goals>
+                  <goal>integration-test</goal>
+                  <goal>verify</goal>
+                </goals>
+                <configuration>
+                  <includes>
+                    <include>WordCountIT.java</include>
+                    <include>WindowedWordCountIT.java</include>
+                  </includes>
+                  <parallel>all</parallel>
+                  <threadCount>4</threadCount>
+                  <systemPropertyVariables>
+                    <beamTestPipelineOptions>
+                      [
+                      "--project=apache-beam-testing",
+                      "--tempRoot=gs://temp-storage-for-end-to-end-tests",
+                      "--runner=TestDataflowRunner",
+                      "--streaming=true"
                       ]
                     </beamTestPipelineOptions>
                   </systemPropertyVariables>
@@ -277,8 +314,9 @@
                 <configuration>
                   <includes>
                     <include>WordCountIT.java</include>
+                    <include>WindowedWordCountIT.java</include>
                   </includes>
-                  <parallel>all</parallel>
+                  <parallel>none</parallel>
                   <threadCount>4</threadCount>
                   <systemPropertyVariables>
                     <beamTestPipelineOptions>
@@ -327,24 +365,8 @@
   </profiles>
 
   <build>
-    <pluginManagement>
-      <plugins>
-        <!-- BEAM-933 -->
-        <plugin>
-          <groupId>org.codehaus.mojo</groupId>
-          <artifactId>findbugs-maven-plugin</artifactId>
-          <configuration>
-            <skip>true</skip>
-          </configuration>
-        </plugin>
-      </plugins>
-    </pluginManagement>
 
     <plugins>
-      <plugin>
-        <artifactId>maven-compiler-plugin</artifactId>
-      </plugin>
-
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
@@ -355,45 +377,6 @@
             </beamTestPipelineOptions>
           </systemPropertyVariables>
         </configuration>
-      </plugin>
-
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-shade-plugin</artifactId>
-        <executions>
-          <execution>
-            <phase>package</phase>
-            <goals>
-              <goal>shade</goal>
-            </goals>
-            <configuration>
-              <finalName>${project.artifactId}-bundled-${project.version}</finalName>
-              <artifactSet>
-                <includes>
-                  <include>*:*</include>
-                </includes>
-              </artifactSet>
-              <filters>
-                <filter>
-                  <artifact>*:*</artifact>
-                  <excludes>
-                    <exclude>META-INF/*.SF</exclude>
-                    <exclude>META-INF/*.DSA</exclude>
-                    <exclude>META-INF/*.RSA</exclude>
-                  </excludes>
-                </filter>
-              </filters>
-              <transformers>
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-              </transformers>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-jar-plugin</artifactId>
       </plugin>
 
       <!-- Coverage analysis for unit tests. -->
@@ -436,6 +419,11 @@
 
     <dependency>
       <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-extensions-google-cloud-platform-core</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
     </dependency>
 
@@ -450,8 +438,28 @@
     </dependency>
 
     <dependency>
+      <groupId>com.google.code.findbugs</groupId>
+      <artifactId>jsr305</artifactId>
+    </dependency>
+
+    <dependency>
       <groupId>com.google.http-client</groupId>
       <artifactId>google-http-client</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.cloud.bigdataoss</groupId>
+      <artifactId>util</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.auth</groupId>
+      <artifactId>google-auth-library-oauth2-http</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.auth</groupId>
+      <artifactId>google-auth-library-credentials</artifactId>
     </dependency>
 
     <dependency>
@@ -513,11 +521,18 @@
 
     <!--
       For testing the example itself, use the direct runner. This is separate from
-      the use of RunnableOnService tests for testing a particular runner.
+      the use of ValidatesRunner tests for testing a particular runner.
     -->
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-runners-direct-java</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
+      <classifier>tests</classifier>
       <scope>test</scope>
     </dependency>
 

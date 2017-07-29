@@ -35,12 +35,12 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.options.ApplicationNameOptions;
-import org.apache.beam.sdk.options.GcpOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.SimpleFunction;
+import org.apache.beam.sdk.util.common.ReflectHelpers;
 import org.apache.beam.sdk.values.PCollection;
 import org.hamcrest.BaseMatcher;
 import org.hamcrest.Description;
@@ -62,6 +62,8 @@ import org.junit.runners.Suite;
   TestPipelineTest.TestPipelineEnforcementsTest.WithCrashingPipelineRunner.class
 })
 public class TestPipelineTest implements Serializable {
+  private static final ObjectMapper MAPPER = new ObjectMapper().registerModules(
+      ObjectMapper.findModules(ReflectHelpers.findClassLoader()));
 
   /** Tests related to the creation of a {@link TestPipeline}. */
   @RunWith(JUnit4.class)
@@ -86,21 +88,19 @@ public class TestPipelineTest implements Serializable {
 
     @Test
     public void testCreationOfPipelineOptions() throws Exception {
-      ObjectMapper mapper = new ObjectMapper();
       String stringOptions =
-          mapper.writeValueAsString(
+          MAPPER.writeValueAsString(
               new String[] {
-                "--runner=org.apache.beam.sdk.testing.CrashingRunner", "--project=testProject"
+                "--runner=org.apache.beam.sdk.testing.CrashingRunner"
               });
       System.getProperties().put("beamTestPipelineOptions", stringOptions);
-      GcpOptions options = TestPipeline.testingPipelineOptions().as(GcpOptions.class);
+      PipelineOptions options = TestPipeline.testingPipelineOptions();
       assertEquals(CrashingRunner.class, options.getRunner());
-      assertEquals(options.getProject(), "testProject");
     }
 
     @Test
     public void testCreationOfPipelineOptionsFromReallyVerboselyNamedTestCase() throws Exception {
-      PipelineOptions options = TestPipeline.testingPipelineOptions();
+      PipelineOptions options = pipeline.getOptions();
       assertThat(
           options.as(ApplicationNameOptions.class).getAppName(),
           startsWith(
@@ -112,23 +112,7 @@ public class TestPipelineTest implements Serializable {
     public void testToString() {
       assertEquals(
           "TestPipeline#TestPipelineTest$TestPipelineCreationTest-testToString",
-          TestPipeline.create().toString());
-    }
-
-    @Test
-    public void testToStringNestedMethod() {
-      TestPipeline p = nestedMethod();
-
-      assertEquals(
-          "TestPipeline#TestPipelineTest$TestPipelineCreationTest-testToStringNestedMethod",
-          p.toString());
-      assertEquals(
-          "TestPipelineTest$TestPipelineCreationTest-testToStringNestedMethod",
-          p.getOptions().as(ApplicationNameOptions.class).getAppName());
-    }
-
-    private TestPipeline nestedMethod() {
-      return TestPipeline.create();
+          pipeline.toString());
     }
 
     @Test
@@ -141,41 +125,6 @@ public class TestPipelineTest implements Serializable {
       assertThat(
           lst,
           containsInAnyOrder("--tempLocation=Test_Location", "--appName=TestPipelineCreationTest"));
-    }
-
-    @Test
-    public void testToStringNestedClassMethod() {
-      TestPipeline p = new NestedTester().p();
-
-      assertEquals(
-          "TestPipeline#TestPipelineTest$TestPipelineCreationTest-testToStringNestedClassMethod",
-          p.toString());
-      assertEquals(
-          "TestPipelineTest$TestPipelineCreationTest-testToStringNestedClassMethod",
-          p.getOptions().as(ApplicationNameOptions.class).getAppName());
-    }
-
-    private static class NestedTester {
-      public TestPipeline p() {
-        return TestPipeline.create();
-      }
-    }
-
-    @Test
-    public void testMatcherSerializationDeserialization() {
-      TestPipelineOptions opts = PipelineOptionsFactory.as(TestPipelineOptions.class);
-      SerializableMatcher<PipelineResult> m1 = new TestMatcher();
-      SerializableMatcher<PipelineResult> m2 = new TestMatcher();
-
-      opts.setOnCreateMatcher(m1);
-      opts.setOnSuccessMatcher(m2);
-
-      String[] arr = TestPipeline.convertToArgs(opts);
-      TestPipelineOptions newOpts =
-          PipelineOptionsFactory.fromArgs(arr).as(TestPipelineOptions.class);
-
-      assertEquals(m1, newOpts.getOnCreateMatcher());
-      assertEquals(m2, newOpts.getOnSuccessMatcher());
     }
 
     @Test
@@ -271,21 +220,21 @@ public class TestPipelineTest implements Serializable {
       @Rule
       public final transient RuleChain chain = RuleChain.outerRule(exception).around(pipeline);
 
-      @Category(RunnableOnService.class)
+      @Category(ValidatesRunner.class)
       @Test
       public void testNormalFlow() throws Exception {
         addTransform(pCollection(pipeline));
         pipeline.run();
       }
 
-      @Category(RunnableOnService.class)
+      @Category(ValidatesRunner.class)
       @Test
       public void testMissingRun() throws Exception {
         exception.expect(TestPipeline.PipelineRunMissingException.class);
         addTransform(pCollection(pipeline));
       }
 
-      @Category(RunnableOnService.class)
+      @Category(ValidatesRunner.class)
       @Test
       public void testMissingRunWithDisabledEnforcement() throws Exception {
         pipeline.enableAbandonedNodeEnforcement(false);
@@ -294,7 +243,7 @@ public class TestPipelineTest implements Serializable {
         // disable abandoned node detection
       }
 
-      @Category(RunnableOnService.class)
+      @Category(ValidatesRunner.class)
       @Test
       public void testMissingRunAutoAdd() throws Exception {
         pipeline.enableAutoRunIfMissing(true);
@@ -303,9 +252,9 @@ public class TestPipelineTest implements Serializable {
         // have the pipeline.run() auto-added
       }
 
-      @Category(RunnableOnService.class)
+      @Category(ValidatesRunner.class)
       @Test
-      public void testDanglingPTransformRunnableOnService() throws Exception {
+      public void testDanglingPTransformValidatesRunner() throws Exception {
         final PCollection<String> pCollection = pCollection(pipeline);
         PAssert.that(pCollection).containsInAnyOrder(WHATEVER);
         pipeline.run().waitUntilFinish();
@@ -329,9 +278,9 @@ public class TestPipelineTest implements Serializable {
         addTransform(pCollection);
       }
 
-      @Category(RunnableOnService.class)
+      @Category(ValidatesRunner.class)
       @Test
-      public void testDanglingPAssertRunnableOnService() throws Exception {
+      public void testDanglingPAssertValidatesRunner() throws Exception {
         final PCollection<String> pCollection = pCollection(pipeline);
         PAssert.that(pCollection).containsInAnyOrder(WHATEVER);
         pipeline.run().waitUntilFinish();
@@ -344,11 +293,11 @@ public class TestPipelineTest implements Serializable {
 
       /**
        * Tests that a {@link TestPipeline} rule behaves as expected when there is no pipeline usage
-       * within a test that has a {@link RunnableOnService} annotation.
+       * within a test that has a {@link ValidatesRunner} annotation.
        */
-      @Category(RunnableOnService.class)
+      @Category(ValidatesRunner.class)
       @Test
-      public void testNoTestPipelineUsedRunnableOnService() {}
+      public void testNoTestPipelineUsedValidatesRunner() {}
 
       /**
        * Tests that a {@link TestPipeline} rule behaves as expected when there is no pipeline usage
@@ -381,7 +330,7 @@ public class TestPipelineTest implements Serializable {
         addTransform(pCollection(pipeline));
 
         // pipeline.run() is missing, BUT:
-        // 1. Neither @RunnableOnService nor @NeedsRunner are present, AND
+        // 1. Neither @ValidatesRunner nor @NeedsRunner are present, AND
         // 2. The runner class is CrashingRunner.class
         // (1) + (2) => we assume this pipeline was never meant to be run, so no exception is
         // thrown on account of the missing run / dangling nodes.

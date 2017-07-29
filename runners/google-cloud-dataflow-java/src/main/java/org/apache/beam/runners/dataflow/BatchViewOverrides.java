@@ -17,12 +17,9 @@
  */
 package org.apache.beam.runners.dataflow;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static org.apache.beam.sdk.util.WindowedValue.valueInEmptyWindows;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Function;
 import com.google.common.base.Optional;
 import com.google.common.collect.ForwardingMap;
@@ -55,7 +52,7 @@ import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.MapCoder;
 import org.apache.beam.sdk.coders.SerializableCoder;
-import org.apache.beam.sdk.coders.StandardCoder;
+import org.apache.beam.sdk.coders.StructuredCoder;
 import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -63,19 +60,15 @@ import org.apache.beam.sdk.transforms.Flatten;
 import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.View.CreatePCollectionView;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.sdk.util.PCollectionViews;
-import org.apache.beam.sdk.util.PropertyNames;
 import org.apache.beam.sdk.util.SystemDoFnInternal;
 import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.util.WindowedValue.FullWindowedValueCoder;
-import org.apache.beam.sdk.util.WindowingStrategy;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
@@ -84,6 +77,7 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.beam.sdk.values.WindowingStrategy;
 
 /**
  * Dataflow batch overrides for {@link CreatePCollectionView}, specialized for different view types.
@@ -189,12 +183,13 @@ class BatchViewOverrides {
     }
 
     private final DataflowRunner runner;
-    /**
-     * Builds an instance of this class from the overridden transform.
-     */
+    private final PCollectionView<Map<K, V>> view;
+    /** Builds an instance of this class from the overridden transform. */
     @SuppressWarnings("unused") // used via reflection in DataflowRunner#apply()
-    public BatchViewAsMap(DataflowRunner runner, View.AsMap<K, V> transform) {
+    public BatchViewAsMap(
+        DataflowRunner runner, CreatePCollectionView<KV<K, V>, Map<K, V>> transform) {
       this.runner = runner;
+      this.view = transform.getView();
     }
 
     @Override
@@ -204,12 +199,7 @@ class BatchViewOverrides {
 
     private <W extends BoundedWindow> PCollectionView<Map<K, V>>
     applyInternal(PCollection<KV<K, V>> input) {
-
-      @SuppressWarnings({"rawtypes", "unchecked"})
-      KvCoder<K, V> inputCoder = (KvCoder) input.getCoder();
       try {
-        PCollectionView<Map<K, V>> view = PCollectionViews.mapView(
-            input.getPipeline(), input.getWindowingStrategy(), inputCoder);
         return BatchViewAsMultimap.applyForMapLike(runner, input, view, true /* unique keys */);
       } catch (NonDeterministicException e) {
         runner.recordViewUsesNonDeterministicKeyCoder(this);
@@ -246,19 +236,14 @@ class BatchViewOverrides {
                   inputCoder.getKeyCoder(),
                   FullWindowedValueCoder.of(inputCoder.getValueCoder(), windowCoder)));
 
-      TransformedMap<K, WindowedValue<V>, V> defaultValue = new TransformedMap<>(
-          WindowedValueToValue.<V>of(),
-          ImmutableMap.<K, WindowedValue<V>>of());
-
       return BatchViewAsSingleton.<KV<K, V>, TransformedMap<K, WindowedValue<V>, V>,
           Map<K, V>,
           W> applyForSingleton(
           runner,
           input,
           new ToMapDoFn<K, V, W>(windowCoder),
-          true,
-          defaultValue,
-          finalValueCoder);
+          finalValueCoder,
+          view);
     }
   }
 
@@ -489,7 +474,7 @@ class BatchViewOverrides {
        */
       private void outputMetadataRecordForSize(
           ProcessContext c, KV<KV<K, W>, WindowedValue<V>> value, long uniqueKeyCount) {
-        c.sideOutput(outputForSize,
+        c.output(outputForSize,
             KV.of(ismCoder.hash(ImmutableList.of(IsmFormat.getMetadataKey(),
                 value.getKey().getValue())),
                 KV.of(value.getKey().getValue(), uniqueKeyCount)));
@@ -498,7 +483,7 @@ class BatchViewOverrides {
       /** This outputs records which will be used to construct the entry set. */
       private void outputMetadataRecordForEntrySet(
           ProcessContext c, KV<KV<K, W>, WindowedValue<V>> value) {
-        c.sideOutput(outputForEntrySet,
+        c.output(outputForEntrySet,
             KV.of(ismCoder.hash(ImmutableList.of(IsmFormat.getMetadataKey(),
                 value.getKey().getValue())),
                 KV.of(value.getKey().getValue(), value.getKey().getKey())));
@@ -677,12 +662,13 @@ class BatchViewOverrides {
     }
 
     private final DataflowRunner runner;
-    /**
-     * Builds an instance of this class from the overridden transform.
-     */
+    private final PCollectionView<Map<K, Iterable<V>>> view;
+    /** Builds an instance of this class from the overridden transform. */
     @SuppressWarnings("unused") // used via reflection in DataflowRunner#apply()
-    public BatchViewAsMultimap(DataflowRunner runner, View.AsMultimap<K, V> transform) {
+    public BatchViewAsMultimap(
+        DataflowRunner runner, CreatePCollectionView<KV<K, V>, Map<K, Iterable<V>>> transform) {
       this.runner = runner;
+      this.view = transform.getView();
     }
 
     @Override
@@ -692,12 +678,7 @@ class BatchViewOverrides {
 
     private <W extends BoundedWindow> PCollectionView<Map<K, Iterable<V>>>
     applyInternal(PCollection<KV<K, V>> input) {
-      @SuppressWarnings({"rawtypes", "unchecked"})
-      KvCoder<K, V> inputCoder = (KvCoder) input.getCoder();
       try {
-        PCollectionView<Map<K, Iterable<V>>> view = PCollectionViews.multimapView(
-            input.getPipeline(), input.getWindowingStrategy(), inputCoder);
-
         return applyForMapLike(runner, input, view, false /* unique keys not expected */);
       } catch (NonDeterministicException e) {
         runner.recordViewUsesNonDeterministicKeyCoder(this);
@@ -735,16 +716,15 @@ class BatchViewOverrides {
               IterableWithWindowedValuesToIterable.<V>of(),
               ImmutableMap.<K, Iterable<WindowedValue<V>>>of());
 
-      return BatchViewAsSingleton.<KV<K, V>,
-          TransformedMap<K, Iterable<WindowedValue<V>>, Iterable<V>>,
-          Map<K, Iterable<V>>,
-          W> applyForSingleton(
-          runner,
-          input,
-          new ToMultimapDoFn<K, V, W>(windowCoder),
-          true,
-          defaultValue,
-          finalValueCoder);
+      return BatchViewAsSingleton
+          .<KV<K, V>, TransformedMap<K, Iterable<WindowedValue<V>>, Iterable<V>>,
+              Map<K, Iterable<V>>, W>
+              applyForSingleton(
+                  runner,
+                  input,
+                  new ToMultimapDoFn<K, V, W>(windowCoder),
+                  finalValueCoder,
+                  view);
     }
 
     private static <K, V, W extends BoundedWindow, ViewT> PCollectionView<ViewT> applyForMapLike(
@@ -768,7 +748,7 @@ class BatchViewOverrides {
           coderForMapLike(windowCoder, inputCoder.getKeyCoder(), inputCoder.getValueCoder());
 
       // Create the various output tags representing the main output containing the data stream
-      // and the side outputs containing the metadata about the size and entry set.
+      // and the additional outputs containing the metadata about the size and entry set.
       TupleTag<IsmRecord<WindowedValue<V>>> mainOutputTag = new TupleTag<>();
       TupleTag<KV<Integer, KV<W, Long>>> outputForSizeTag = new TupleTag<>();
       TupleTag<KV<Integer, KV<W, K>>> outputForEntrySetTag = new TupleTag<>();
@@ -824,10 +804,9 @@ class BatchViewOverrides {
           PCollectionList.of(ImmutableList.of(
               perHashWithReifiedWindows, windowMapSizeMetadata, windowMapKeysMetadata));
 
-      return Pipeline.applyTransform(outputs,
-          Flatten.<IsmRecord<WindowedValue<V>>>pCollections())
-          .apply(CreatePCollectionView.<IsmRecord<WindowedValue<V>>,
-              ViewT>of(view));
+      Pipeline.applyTransform(outputs, Flatten.<IsmRecord<WindowedValue<V>>>pCollections())
+          .apply(CreateDataflowView.<IsmRecord<WindowedValue<V>>, ViewT>of(view));
+      return view;
     }
 
     @Override
@@ -912,14 +891,12 @@ class BatchViewOverrides {
     }
 
     private final DataflowRunner runner;
-    private final View.AsSingleton<T> transform;
-    /**
-     * Builds an instance of this class from the overridden transform.
-     */
+    private final PCollectionView<T> view;
+    /** Builds an instance of this class from the overridden transform. */
     @SuppressWarnings("unused") // used via reflection in DataflowRunner#apply()
-    public BatchViewAsSingleton(DataflowRunner runner, View.AsSingleton<T> transform) {
+    public BatchViewAsSingleton(DataflowRunner runner, CreatePCollectionView<T, T> transform) {
       this.runner = runner;
-      this.transform = transform;
+      this.view = transform.getView();
     }
 
     @Override
@@ -932,9 +909,8 @@ class BatchViewOverrides {
           runner,
           input,
           new IsmRecordForSingularValuePerWindowDoFn<T, BoundedWindow>(windowCoder),
-          transform.hasDefaultValue(),
-          transform.defaultValue(),
-          input.getCoder());
+          input.getCoder(),
+          view);
     }
 
     static <T, FinalT, ViewT, W extends BoundedWindow> PCollectionView<ViewT>
@@ -943,22 +919,12 @@ class BatchViewOverrides {
         PCollection<T> input,
         DoFn<KV<Integer, Iterable<KV<W, WindowedValue<T>>>>,
             IsmRecord<WindowedValue<FinalT>>> doFn,
-        boolean hasDefault,
-        FinalT defaultValue,
-        Coder<FinalT> defaultValueCoder) {
+        Coder<FinalT> defaultValueCoder,
+        PCollectionView<ViewT> view) {
 
       @SuppressWarnings("unchecked")
       Coder<W> windowCoder = (Coder<W>)
           input.getWindowingStrategy().getWindowFn().windowCoder();
-
-      @SuppressWarnings({"rawtypes", "unchecked"})
-      PCollectionView<ViewT> view =
-          (PCollectionView<ViewT>) PCollectionViews.<FinalT, W>singletonView(
-              input.getPipeline(),
-              (WindowingStrategy) input.getWindowingStrategy(),
-              hasDefault,
-              defaultValue,
-              defaultValueCoder);
 
       IsmRecordCoder<WindowedValue<FinalT>> ismCoder =
           coderForSingleton(windowCoder, defaultValueCoder);
@@ -969,8 +935,9 @@ class BatchViewOverrides {
       reifiedPerWindowAndSorted.setCoder(ismCoder);
 
       runner.addPCollectionRequiringIndexedFormat(reifiedPerWindowAndSorted);
-      return reifiedPerWindowAndSorted.apply(
-          CreatePCollectionView.<IsmRecord<WindowedValue<FinalT>>, ViewT>of(view));
+      reifiedPerWindowAndSorted.apply(
+          CreateDataflowView.<IsmRecord<WindowedValue<FinalT>>, ViewT>of(view));
+      return view;
     }
 
     @Override
@@ -1018,7 +985,7 @@ class BatchViewOverrides {
 
       long indexInBundle;
       @StartBundle
-      public void startBundle(Context c) throws Exception {
+      public void startBundle() throws Exception {
         indexInBundle = 0;
       }
 
@@ -1076,18 +1043,18 @@ class BatchViewOverrides {
     }
 
     private final DataflowRunner runner;
+    private final PCollectionView<List<T>> view;
     /**
      * Builds an instance of this class from the overridden transform.
      */
     @SuppressWarnings("unused") // used via reflection in DataflowRunner#apply()
-    public BatchViewAsList(DataflowRunner runner, View.AsList<T> transform) {
+    public BatchViewAsList(DataflowRunner runner, CreatePCollectionView<T, List<T>> transform) {
       this.runner = runner;
+      this.view = transform.getView();
     }
 
     @Override
     public PCollectionView<List<T>> expand(PCollection<T> input) {
-      PCollectionView<List<T>> view = PCollectionViews.listView(
-          input.getPipeline(), input.getWindowingStrategy(), input.getCoder());
       return applyForIterableLike(runner, input, view);
     }
 
@@ -1113,8 +1080,9 @@ class BatchViewOverrides {
         reifiedPerWindowAndSorted.setCoder(ismCoder);
 
         runner.addPCollectionRequiringIndexedFormat(reifiedPerWindowAndSorted);
-        return reifiedPerWindowAndSorted.apply(
-            CreatePCollectionView.<IsmRecord<WindowedValue<T>>, ViewT>of(view));
+        reifiedPerWindowAndSorted.apply(
+            CreateDataflowView.<IsmRecord<WindowedValue<T>>, ViewT>of(view));
+        return view;
       }
 
       PCollection<IsmRecord<WindowedValue<T>>> reifiedPerWindowAndSorted = input
@@ -1123,8 +1091,9 @@ class BatchViewOverrides {
       reifiedPerWindowAndSorted.setCoder(ismCoder);
 
       runner.addPCollectionRequiringIndexedFormat(reifiedPerWindowAndSorted);
-      return reifiedPerWindowAndSorted.apply(
-          CreatePCollectionView.<IsmRecord<WindowedValue<T>>, ViewT>of(view));
+      reifiedPerWindowAndSorted.apply(
+          CreateDataflowView.<IsmRecord<WindowedValue<T>>, ViewT>of(view));
+      return view;
     }
 
     @Override
@@ -1161,18 +1130,17 @@ class BatchViewOverrides {
       extends PTransform<PCollection<T>, PCollectionView<Iterable<T>>> {
 
     private final DataflowRunner runner;
-    /**
-     * Builds an instance of this class from the overridden transform.
-     */
+    private final PCollectionView<Iterable<T>> view;
+    /** Builds an instance of this class from the overridden transform. */
     @SuppressWarnings("unused") // used via reflection in DataflowRunner#apply()
-    public BatchViewAsIterable(DataflowRunner runner, View.AsIterable<T> transform) {
+    public BatchViewAsIterable(
+        DataflowRunner runner, CreatePCollectionView<T, Iterable<T>> transform) {
       this.runner = runner;
+      this.view = transform.getView();
     }
 
     @Override
     public PCollectionView<Iterable<T>> expand(PCollection<T> input) {
-      PCollectionView<Iterable<T>> view = PCollectionViews.iterableView(
-          input.getPipeline(), input.getWindowingStrategy(), input.getCoder());
       return BatchViewAsList.applyForIterableLike(runner, input, view);
     }
   }
@@ -1332,7 +1300,7 @@ class BatchViewOverrides {
    * A {@link Coder} for {@link TransformedMap}s.
    */
   static class TransformedMapCoder<K, V1, V2>
-      extends StandardCoder<TransformedMap<K, V1, V2>> {
+      extends StructuredCoder<TransformedMap<K, V1, V2>> {
     private final Coder<Function<V1, V2>> transformCoder;
     private final Coder<Map<K, V1>> originalMapCoder;
 
@@ -1347,32 +1315,19 @@ class BatchViewOverrides {
       return new TransformedMapCoder<>(transformCoder, originalMapCoder);
     }
 
-    @JsonCreator
-    public static <K, V1, V2> TransformedMapCoder<K, V1, V2> of(
-        @JsonProperty(PropertyNames.COMPONENT_ENCODINGS)
-            List<Coder<?>> components) {
-      checkArgument(components.size() == 2,
-          "Expecting 2 components, got " + components.size());
-      @SuppressWarnings("unchecked")
-      Coder<Function<V1, V2>> transformCoder = (Coder<Function<V1, V2>>) components.get(0);
-      @SuppressWarnings("unchecked")
-      Coder<Map<K, V1>> originalMapCoder = (Coder<Map<K, V1>>) components.get(1);
-      return of(transformCoder, originalMapCoder);
+    @Override
+    public void encode(TransformedMap<K, V1, V2> value, OutputStream outStream)
+        throws CoderException, IOException {
+      transformCoder.encode(value.transform, outStream);
+      originalMapCoder.encode(value.originalMap, outStream);
     }
 
     @Override
-    public void encode(TransformedMap<K, V1, V2> value, OutputStream outStream,
-        Coder.Context context) throws CoderException, IOException {
-      transformCoder.encode(value.transform, outStream, context.nested());
-      originalMapCoder.encode(value.originalMap, outStream, context);
-    }
-
-    @Override
-    public TransformedMap<K, V1, V2> decode(
-        InputStream inStream, Coder.Context context) throws CoderException, IOException {
+    public TransformedMap<K, V1, V2> decode(InputStream inStream)
+        throws CoderException, IOException {
       return new TransformedMap<>(
-          transformCoder.decode(inStream, context.nested()),
-          originalMapCoder.decode(inStream, context));
+          transformCoder.decode(inStream),
+          originalMapCoder.decode(inStream));
     }
 
     @Override
@@ -1383,9 +1338,8 @@ class BatchViewOverrides {
     @Override
     public void verifyDeterministic()
         throws org.apache.beam.sdk.coders.Coder.NonDeterministicException {
-      verifyDeterministic("Expected transform coder to be deterministic.", transformCoder);
-      verifyDeterministic("Expected map coder to be deterministic.", originalMapCoder);
+      verifyDeterministic(this, "Expected transform coder to be deterministic.", transformCoder);
+      verifyDeterministic(this, "Expected map coder to be deterministic.", originalMapCoder);
     }
   }
-
 }

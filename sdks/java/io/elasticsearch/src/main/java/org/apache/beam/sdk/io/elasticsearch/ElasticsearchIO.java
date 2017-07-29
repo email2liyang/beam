@@ -25,7 +25,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
-
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.MalformedURLException;
@@ -40,7 +39,7 @@ import java.util.ListIterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import javax.annotation.Nullable;
-
+import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.BoundedSource;
@@ -68,6 +67,7 @@ import org.elasticsearch.client.RestClientBuilder;
 
 /**
  * Transforms for reading and writing data from/to Elasticsearch.
+ * This IO is only compatible with Elasticsearch v2.x
  *
  * <h3>Reading from Elasticsearch</h3>
  *
@@ -113,6 +113,7 @@ import org.elasticsearch.client.RestClientBuilder;
  * <p>Optionally, you can provide {@code withBatchSize()} and {@code withBatchSizeBytes()}
  * to specify the size of the write batch in number of documents or in bytes.
  */
+@Experimental(Experimental.Kind.SOURCE_SINK)
 public class ElasticsearchIO {
 
   public static Read read() {
@@ -138,7 +139,7 @@ public class ElasticsearchIO {
 
   private static final ObjectMapper mapper = new ObjectMapper();
 
-  private static JsonNode parseResponse(Response response) throws IOException {
+  static JsonNode parseResponse(Response response) throws IOException {
     return mapper.readValue(response.getEntity().getContent(), JsonNode.class);
   }
 
@@ -183,7 +184,7 @@ public class ElasticsearchIO {
      * @param type the document type toward which the requests will be issued
      * @return the connection configuration object
      */
-    public static ConnectionConfiguration create(String[] addresses, String index, String type) {
+    public static ConnectionConfiguration create(String[] addresses, String index, String type){
       checkArgument(
           addresses != null,
           "ConnectionConfiguration.create(addresses, index, type) called with null address");
@@ -197,11 +198,13 @@ public class ElasticsearchIO {
       checkArgument(
           type != null,
           "ConnectionConfiguration.create(addresses, index, type) called with null type");
-      return new AutoValue_ElasticsearchIO_ConnectionConfiguration.Builder()
-          .setAddresses(Arrays.asList(addresses))
-          .setIndex(index)
-          .setType(type)
-          .build();
+      ConnectionConfiguration connectionConfiguration =
+          new AutoValue_ElasticsearchIO_ConnectionConfiguration.Builder()
+              .setAddresses(Arrays.asList(addresses))
+              .setIndex(index)
+              .setType(type)
+              .build();
+      return connectionConfiguration;
     }
 
     /**
@@ -243,7 +246,7 @@ public class ElasticsearchIO {
       builder.addIfNotNull(DisplayData.item("username", getUsername()));
     }
 
-    private RestClient createClient() throws MalformedURLException {
+    RestClient createClient() throws MalformedURLException {
       HttpHost[] hosts = new HttpHost[getAddresses().size()];
       int i = 0;
       for (String address : getAddresses()) {
@@ -376,17 +379,21 @@ public class ElasticsearchIO {
     }
 
     @Override
-    public void validate(PBegin input) {
+    public void validate(PipelineOptions options) {
+      ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
       checkState(
-          getConnectionConfiguration() != null,
+          connectionConfiguration != null,
           "ElasticsearchIO.read() requires a connection configuration"
               + " to be set via withConnectionConfiguration(configuration)");
+      checkVersion(connectionConfiguration);
     }
 
     @Override
     public void populateDisplayData(DisplayData.Builder builder) {
       super.populateDisplayData(builder);
       builder.addIfNotNull(DisplayData.item("query", getQuery()));
+      builder.addIfNotNull(DisplayData.item("batchSize", getBatchSize()));
+      builder.addIfNotNull(DisplayData.item("scrollKeepalive", getScrollKeepalive()));
       getConnectionConfiguration().populateDisplayData(builder);
     }
   }
@@ -405,7 +412,7 @@ public class ElasticsearchIO {
     }
 
     @Override
-    public List<? extends BoundedSource<String>> splitIntoBundles(
+    public List<? extends BoundedSource<String>> split(
         long desiredBundleSizeBytes, PipelineOptions options) throws Exception {
       List<BoundedElasticsearchSource> sources = new ArrayList<>();
 
@@ -434,16 +441,7 @@ public class ElasticsearchIO {
       while (shards.hasNext()) {
         Map.Entry<String, JsonNode> shardJson = shards.next();
         String shardId = shardJson.getKey();
-        JsonNode value = (JsonNode) shardJson.getValue();
-        boolean isPrimaryShard =
-            value
-                .path(0)
-                .path("routing")
-                .path("primary")
-                .asBoolean();
-        if (isPrimaryShard) {
-          sources.add(new BoundedElasticsearchSource(spec, shardId));
-        }
+        sources.add(new BoundedElasticsearchSource(spec, shardId));
       }
       checkArgument(!sources.isEmpty(), "No primary shard found");
       return sources;
@@ -702,11 +700,13 @@ public class ElasticsearchIO {
     }
 
     @Override
-    public void validate(PCollection<String> input) {
+    public void validate(PipelineOptions options) {
+      ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
       checkState(
-          getConnectionConfiguration() != null,
+          connectionConfiguration != null,
           "ElasticsearchIO.write() requires a connection configuration"
               + " to be set via withConnectionConfiguration(configuration)");
+      checkVersion(connectionConfiguration);
     }
 
     @Override
@@ -734,7 +734,7 @@ public class ElasticsearchIO {
       }
 
       @StartBundle
-      public void startBundle(Context context) throws Exception {
+      public void startBundle(StartBundleContext context) throws Exception {
         batch = new ArrayList<>();
         currentBatchSizeBytes = 0;
       }
@@ -746,12 +746,16 @@ public class ElasticsearchIO {
         currentBatchSizeBytes += document.getBytes().length;
         if (batch.size() >= spec.getMaxBatchSize()
             || currentBatchSizeBytes >= spec.getMaxBatchSizeBytes()) {
-          finishBundle(context);
+          flushBatch();
         }
       }
 
       @FinishBundle
-      public void finishBundle(Context context) throws Exception {
+      public void finishBundle(FinishBundleContext context) throws Exception {
+        flushBatch();
+      }
+
+      private void flushBatch() throws IOException {
         if (batch.isEmpty()) {
           return;
         }
@@ -810,6 +814,18 @@ public class ElasticsearchIO {
           restClient.close();
         }
       }
+    }
+  }
+  private static void checkVersion(ConnectionConfiguration connectionConfiguration){
+    try (RestClient restClient = connectionConfiguration.createClient()) {
+      Response response = restClient.performRequest("GET", "", new BasicHeader("", ""));
+      JsonNode jsonNode = parseResponse(response);
+      String version = jsonNode.path("version").path("number").asText();
+      boolean version2x = version.startsWith("2.");
+      checkArgument(version2x, "The Elasticsearch version to connect to is different of 2.x. "
+          + "This version of the ElasticsearchIO is only compatible with Elasticsearch v2.x");
+    } catch (IOException e) {
+      throw new IllegalArgumentException("Cannot check Elasticsearch version");
     }
   }
 }

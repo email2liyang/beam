@@ -37,6 +37,7 @@ import uuid
 
 from apache_beam import pvalue
 from apache_beam import coders
+from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.pvalue import AsIter
 from apache_beam.pvalue import AsSingleton
 from apache_beam.transforms import core
@@ -44,6 +45,10 @@ from apache_beam.transforms import ptransform
 from apache_beam.transforms import window
 from apache_beam.transforms.display import HasDisplayData
 from apache_beam.transforms.display import DisplayDataItem
+from apache_beam.utils import urns
+from apache_beam.utils.windowed_value import WindowedValue
+
+__all__ = ['BoundedSource', 'RangeTracker', 'Read', 'Sink', 'Write', 'Writer']
 
 
 # Encapsulates information about a bundle of a source generated when method
@@ -67,7 +72,13 @@ SourceBundle = namedtuple(
     'weight source start_position stop_position')
 
 
-class BoundedSource(HasDisplayData):
+class SourceBase(HasDisplayData, urns.RunnerApiFn):
+  """Base class for all sources that can be passed to beam.io.Read(...).
+  """
+  urns.RunnerApiFn.register_pickle_urn(urns.PICKLED_SOURCE)
+
+
+class BoundedSource(SourceBase):
   """A source that reads a finite amount of input records.
 
   This class defines following operations which can be used to read the source
@@ -185,6 +196,9 @@ class BoundedSource(HasDisplayData):
     more efficiently than pickling.
     """
     return coders.registry.get_coder(object)
+
+  def is_bounded(self):
+    return True
 
 
 class RangeTracker(object):
@@ -559,9 +573,11 @@ class RangeTracker(object):
 
 
 class Sink(HasDisplayData):
-  """A resource that can be written to using the ``df.io.Write`` transform.
+  """This class is deprecated, no backwards-compatibility guarantees.
 
-  Here ``df`` stands for Dataflow Python code imported in following manner.
+  A resource that can be written to using the ``beam.io.Write`` transform.
+
+  Here ``beam`` stands for Apache Beam Python code imported in following manner.
   ``import apache_beam as beam``.
 
   A parallel write to an ``iobase.Sink`` consists of three phases:
@@ -571,9 +587,6 @@ class Sink(HasDisplayData):
   2. A parallel write phase where workers write *bundles* of records
   3. A sequential *finalization* phase (e.g., committing the writes, merging
      output files, etc.)
-
-  For exact definition of a Dataflow bundle please see
-  https://cloud.google.com/dataflow/faq.
 
   Implementing a new sink requires extending two classes.
 
@@ -594,8 +607,8 @@ class Sink(HasDisplayData):
   single record from the bundle and ``close()`` which is called once
   at the end of writing a bundle.
 
-  See also ``df.io.fileio.FileSink`` which provides a simpler API for writing
-  sinks that produce files.
+  See also ``apache_beam.io.filebasedsink.FileBasedSink`` which provides a
+  simpler API for writing sinks that produce files.
 
   **Execution of the Write transform**
 
@@ -692,7 +705,7 @@ class Sink(HasDisplayData):
 
   For more information on creating new sinks please refer to the official
   documentation at
-  ``https://cloud.google.com/dataflow/model/custom-io#creating-sinks``.
+  ``https://beam.apache.org/documentation/sdks/python-custom-io#creating-sinks``
   """
 
   def initialize_write(self):
@@ -759,7 +772,9 @@ class Sink(HasDisplayData):
 
 
 class Writer(object):
-  """Writes a bundle of elements from a ``PCollection`` to a sink.
+  """This class is deprecated, no backwards-compatibility guarantees.
+
+  Writes a bundle of elements from a ``PCollection`` to a sink.
 
   A Writer  ``iobase.Writer.write()`` writes and elements to the sink while
   ``iobase.Writer.close()`` is called after all elements in the bundle have been
@@ -815,6 +830,24 @@ class Read(ptransform.PTransform):
     return {'source': DisplayDataItem(self.source.__class__,
                                       label='Read Source'),
             'source_dd': self.source}
+
+  def to_runner_api_parameter(self, context):
+    return (urns.READ_TRANSFORM,
+            beam_runner_api_pb2.ReadPayload(
+                source=self.source.to_runner_api(context),
+                is_bounded=beam_runner_api_pb2.BOUNDED
+                if self.source.is_bounded()
+                else beam_runner_api_pb2.UNBOUNDED))
+
+  @staticmethod
+  def from_runner_api_parameter(parameter, context):
+    return Read(SourceBase.from_runner_api(parameter.source, context))
+
+
+ptransform.PTransform.register_urn(
+    urns.READ_TRANSFORM,
+    beam_runner_api_pb2.ReadPayload,
+    Read.from_runner_api_parameter)
 
 
 class Write(ptransform.PTransform):
@@ -907,7 +940,7 @@ class WriteImpl(ptransform.PTransform):
                            | core.WindowInto(window.GlobalWindows())
                            | core.GroupByKey()
                            | 'Extract' >> core.FlatMap(lambda x: x[1]))
-    return do_once | 'finalize_write' >> core.FlatMap(
+    return do_once | 'FinalizeWrite' >> core.FlatMap(
         _finalize_write,
         self.sink,
         AsSingleton(init_result_coll),
@@ -934,7 +967,8 @@ class _WriteBundleDoFn(core.DoFn):
 
   def finish_bundle(self):
     if self.writer is not None:
-      yield window.TimestampedValue(self.writer.close(), window.MAX_TIMESTAMP)
+      yield WindowedValue(self.writer.close(), window.MAX_TIMESTAMP,
+                          [window.GlobalWindow()])
 
 
 class _WriteKeyedBundleDoFn(core.DoFn):
@@ -948,8 +982,8 @@ class _WriteKeyedBundleDoFn(core.DoFn):
   def process(self, element, init_result):
     bundle = element
     writer = self.sink.open_writer(init_result, str(uuid.uuid4()))
-    for element in bundle[1]:  # values
-      writer.write(element)
+    for e in bundle[1]:  # values
+      writer.write(e)
     return [window.TimestampedValue(writer.close(), window.MAX_TIMESTAMP)]
 
 
@@ -980,8 +1014,3 @@ class _RoundRobinKeyFn(core.DoFn):
     if self.counter >= self.count:
       self.counter -= self.count
     yield self.counter, element
-
-
-# For backwards compatibility.
-# pylint: disable=wrong-import-position
-from apache_beam.runners.dataflow.native_io.iobase import *

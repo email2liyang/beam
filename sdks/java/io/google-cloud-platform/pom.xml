@@ -22,7 +22,7 @@
   <parent>
     <groupId>org.apache.beam</groupId>
     <artifactId>beam-sdks-java-io-parent</artifactId>
-    <version>0.7.0-SNAPSHOT</version>
+    <version>2.2.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
@@ -31,11 +31,22 @@
   <description>IO library to read and write Google Cloud Platform systems from Beam.</description>
   <packaging>jar</packaging>
 
-  <properties>
-    <bigtable.version>0.9.2</bigtable.version>
-  </properties>
-
   <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-shade-plugin</artifactId>
+          <executions>
+            <execution>
+              <id>bundle-and-repackage</id>
+              <phase>none</phase>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -46,32 +57,99 @@
           </systemPropertyVariables>
         </configuration>
       </plugin>
-
-      <!-- Integration Tests -->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-failsafe-plugin</artifactId>
-        <configuration>
-          <useManifestOnlyJar>false</useManifestOnlyJar>
-        </configuration>
-        <executions>
-          <execution>
-            <goals>
-              <goal>integration-test</goal>
-              <goal>verify</goal>
-            </goals>
-            <configuration>
-              <parallel>all</parallel>
-              <threadCount>4</threadCount>
-              <systemPropertyVariables>
-                <beamTestPipelineOptions>${integrationTestPipelineOptions}</beamTestPipelineOptions>
-              </systemPropertyVariables>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!-- This profile invokes PerfKitBenchmarker, which does benchmarking of
+         the IO ITs. The arguments passed to it allow it to invoke mvn again
+         with the desired benchmark.
+
+         To invoke this, run:
+         mvn verify -Dio-it-suite -pl sdks/java/io/google-cloud-platform
+            -DpkbLocation="path-to-pkb.py" \
+            -DintegrationTestPipelineOptions='["-tempRoot=gs://bucket/staging", "-project=your-project-id"]' \
+            -DgcpIoItClass=[your favorite IO's IT]
+    -->
+    <profile>
+      <id>io-it-suite</id>
+      <properties>
+        <!-- This is based on the location of the current pom relative to the
+             root. See discussion in BEAM-2460. -->
+        <beamRootProjectDir>
+          ${project.parent.parent.parent.parent.basedir}
+        </beamRootProjectDir>
+      </properties>
+      <activation><property><name>io-it-suite</name></property></activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.gmaven</groupId>
+            <artifactId>groovy-maven-plugin</artifactId>
+            <version>${groovy-maven-plugin.version}</version>
+            <executions>
+              <execution>
+                <id>find-supported-python-for-compile</id>
+                <phase>initialize</phase>
+                <goals>
+                  <goal>execute</goal>
+                </goals>
+                <configuration>
+                  <source>${beamRootProjectDir}/sdks/python/findSupportedPython.groovy</source>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <version>${maven-exec-plugin.version}</version>
+            <executions>
+              <execution>
+                <phase>verify</phase>
+                <goals>
+                  <goal>exec</goal>
+                </goals>
+              </execution>
+            </executions>
+            <configuration>
+              <executable>${python.interpreter.bin}</executable>
+              <arguments>
+                <argument>${pkbLocation}</argument>
+                <argument>-benchmarks=beam_integration_benchmark</argument>
+                <argument>-beam_it_profile=io-it</argument>
+                <argument>-beam_location=${beamRootProjectDir}</argument>
+                <argument>-beam_prebuilt=true</argument>
+                <argument>-beam_sdk=java</argument>
+                <argument>-kubeconfig=${kubeconfig}</argument>
+                <argument>-kubectl=${kubectl}</argument>
+                <!-- runner overrides, controlled via forceDirectRunner -->
+                <argument>${pkbBeamRunnerProfile}</argument>
+                <argument>${pkbBeamRunnerOption}</argument>
+                <!-- specific to this IO -->
+                <argument>-beam_it_module=runners/google-cloud-dataflow-java</argument>
+                <!-- Most IOs have only one IT so this can be hard coded, but
+                     since the GCP IO dir contains multiple IOs, we allow the
+                     user to specify which particular one they want to run. -->
+                <argument>-beam_it_class=${gcpIoItClass}</argument>
+                <!-- arguments typically defined by user -->
+                <argument>-beam_it_options=${integrationTestPipelineOptions}</argument>
+              </arguments>
+            </configuration>
+          </plugin>
+
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <version>${surefire-plugin.version}</version>
+            <configuration>
+              <skipTests>true</skipTests>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 
   <dependencies>
     <dependency>
@@ -79,11 +157,24 @@
       <artifactId>beam-sdks-java-core</artifactId>
     </dependency>
 
-    <!-- Build dependencies -->
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-extensions-google-cloud-platform-core</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-extensions-protobuf</artifactId>
+    </dependency>
 
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
-      <artifactId>jackson-annotations</artifactId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-core</artifactId>
     </dependency>
 
     <dependency>
@@ -92,14 +183,23 @@
     </dependency>
 
     <dependency>
-      <groupId>com.google.apis</groupId>
-      <artifactId>google-api-services-storage</artifactId>
+      <groupId>com.google.api</groupId>
+      <artifactId>gax-grpc</artifactId>
     </dependency>
 
     <dependency>
-      <groupId>com.google.auto.service</groupId>
-      <artifactId>auto-service</artifactId>
-      <optional>true</optional>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-core-grpc</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.apis</groupId>
+      <artifactId>google-api-services-pubsub</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.api.grpc</groupId>
+      <artifactId>grpc-google-pubsub-v1</artifactId>
     </dependency>
 
     <dependency>
@@ -118,13 +218,31 @@
     </dependency>
 
     <dependency>
-      <groupId>com.google.protobuf</groupId>
-      <artifactId>protobuf-lite</artifactId>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-auth</artifactId>
     </dependency>
 
     <dependency>
       <groupId>io.grpc</groupId>
-      <artifactId>grpc-core</artifactId>
+      <artifactId>grpc-netty</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-handler</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-stub</artifactId>
+    </dependency>
+
+    <!-- grpc-all does not obey IWYU, so we need to exclude from compile
+         scope and depend on it at runtime. -->
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-all</artifactId>
+      <scope>runtime</scope>
     </dependency>
 
     <dependency>
@@ -133,15 +251,23 @@
     </dependency>
 
     <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-core</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-spanner</artifactId>
+    </dependency>
+
+    <dependency>
       <groupId>com.google.cloud.bigtable</groupId>
       <artifactId>bigtable-protos</artifactId>
-      <version>${bigtable.version}</version>
     </dependency>
 
     <dependency>
       <groupId>com.google.cloud.bigtable</groupId>
       <artifactId>bigtable-client-core</artifactId>
-      <version>${bigtable.version}</version>
     </dependency>
 
     <dependency>
@@ -192,7 +318,6 @@
     <dependency>
       <groupId>io.netty</groupId>
       <artifactId>netty-tcnative-boringssl-static</artifactId>
-      <version>1.1.33.Fork18</version>
       <scope>runtime</scope>
     </dependency>
 
@@ -201,13 +326,30 @@
       <artifactId>avro</artifactId>
     </dependency>
 
+    <!-- Build dependencies -->
     <dependency>
       <groupId>com.google.auto.value</groupId>
       <artifactId>auto-value</artifactId>
       <scope>provided</scope>
     </dependency>
 
-    <!--  test -->
+    <dependency>
+      <groupId>com.google.auto.service</groupId>
+      <artifactId>auto-service</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.api.grpc</groupId>
+      <artifactId>proto-google-cloud-spanner-admin-database-v1</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.api.grpc</groupId>
+      <artifactId>proto-google-common-protos</artifactId>
+    </dependency>
+
+    <!--  Test dependencies -->
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-core</artifactId>
@@ -217,14 +359,14 @@
 
     <dependency>
       <groupId>org.apache.beam</groupId>
-      <artifactId>beam-runners-direct-java</artifactId>
+      <artifactId>beam-sdks-java-extensions-google-cloud-platform-core</artifactId>
+      <classifier>tests</classifier>
       <scope>test</scope>
     </dependency>
 
     <dependency>
       <groupId>org.apache.beam</groupId>
-      <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
-      <version>${project.version}</version>
+      <artifactId>beam-runners-direct-java</artifactId>
       <scope>test</scope>
     </dependency>
 
@@ -252,5 +394,4 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
-
 </project>

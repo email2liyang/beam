@@ -21,8 +21,11 @@ import logging
 
 from hamcrest.core.base_matcher import BaseMatcher
 
-from apache_beam.tests.test_utils import compute_hash
+from apache_beam.testing.test_utils import compute_hash
 from apache_beam.utils import retry
+
+__all__ = ['BigqueryMatcher']
+
 
 # Protect against environments where bigquery library is not available.
 # pylint: disable=wrong-import-order, wrong-import-position
@@ -38,8 +41,7 @@ MAX_RETRIES = 4
 
 def retry_on_http_and_value_error(exception):
   """Filter allowing retries on Bigquery errors and value error."""
-  return isinstance(exception, GoogleCloudError) or \
-          isinstance(exception, ValueError)
+  return isinstance(exception, (GoogleCloudError, ValueError))
 
 
 class BigqueryMatcher(BaseMatcher):
@@ -90,9 +92,9 @@ class BigqueryMatcher(BaseMatcher):
     page_token = None
     results = []
     while True:
-      rows, _, page_token = query.fetch_data(page_token=page_token)
-      results.extend(rows)
-      if not page_token:
+      for row in query.fetch_data(page_token=page_token):
+        results.append(row)
+      if results:
         break
 
     return results

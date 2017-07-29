@@ -15,8 +15,15 @@
 # limitations under the License.
 #
 
-"""Cloud Datastore helper functions."""
+"""Cloud Datastore helper functions.
+
+For internal use only; no backwards-compatibility guarantees.
+"""
+
+import errno
+from socket import error as SocketError
 import sys
+import time
 
 # Protect against environments where datastore library is not available.
 # pylint: disable=wrong-import-order, wrong-import-position
@@ -24,13 +31,13 @@ try:
   from google.cloud.proto.datastore.v1 import datastore_pb2
   from google.cloud.proto.datastore.v1 import entity_pb2
   from google.cloud.proto.datastore.v1 import query_pb2
+  from google.rpc import code_pb2
   from googledatastore import PropertyFilter, CompositeFilter
   from googledatastore import helper as datastore_helper
   from googledatastore.connection import Datastore
   from googledatastore.connection import RPCError
-  QUERY_NOT_FINISHED = query_pb2.QueryResultBatch.NOT_FINISHED
 except ImportError:
-  QUERY_NOT_FINISHED = None
+  pass
 # pylint: enable=wrong-import-order, wrong-import-position
 
 from apache_beam.internal.gcp import auth
@@ -62,8 +69,7 @@ def key_comparator(k1, k2):
   k2_path = next(k2_iter, None)
   if k2_path:
     return -1
-  else:
-    return 0
+  return 0
 
 
 def compare_path(p1, p2):
@@ -78,7 +84,7 @@ def compare_path(p1, p2):
   3. If no `id` is defined for both paths, then their `names` are compared.
   """
 
-  result = str_compare(p1.kind, p2.kind)
+  result = cmp(p1.kind, p2.kind)
   if result != 0:
     return result
 
@@ -86,27 +92,18 @@ def compare_path(p1, p2):
     if not p2.HasField('id'):
       return -1
 
-    return p1.id - p2.id
+    return cmp(p1.id, p2.id)
 
   if p2.HasField('id'):
     return 1
 
-  return str_compare(p1.name, p2.name)
-
-
-def str_compare(s1, s2):
-  if s1 == s2:
-    return 0
-  elif s1 < s2:
-    return -1
-  else:
-    return 1
+  return cmp(p1.name, p2.name)
 
 
 def get_datastore(project):
   """Returns a Cloud Datastore client."""
   credentials = auth.get_service_credentials()
-  return Datastore(project, credentials)
+  return Datastore(project, credentials, host='batch-datastore.googleapis.com')
 
 
 def make_request(project, namespace, query):
@@ -131,13 +128,18 @@ def make_partition(project, namespace):
 def retry_on_rpc_error(exception):
   """A retry filter for Cloud Datastore RPCErrors."""
   if isinstance(exception, RPCError):
-    if exception.code >= 500:
-      return True
-    else:
-      return False
-  else:
-    # TODO(vikasrk): Figure out what other errors should be retried.
-    return False
+    err_code = exception.code
+    # TODO(BEAM-2156): put these codes in a global list and use that instead.
+    return (err_code == code_pb2.DEADLINE_EXCEEDED or
+            err_code == code_pb2.UNAVAILABLE or
+            err_code == code_pb2.UNKNOWN or
+            err_code == code_pb2.INTERNAL)
+
+  if isinstance(exception, SocketError):
+    return (exception.errno == errno.ECONNRESET or
+            exception.errno == errno.ETIMEDOUT)
+
+  return False
 
 
 def fetch_entities(project, namespace, query, datastore):
@@ -165,13 +167,25 @@ def is_key_valid(key):
   return key.path[-1].HasField('id') or key.path[-1].HasField('name')
 
 
-def write_mutations(datastore, project, mutations):
+def write_mutations(datastore, project, mutations, rpc_stats_callback=None):
   """A helper function to write a batch of mutations to Cloud Datastore.
 
   If a commit fails, it will be retried upto 5 times. All mutations in the
   batch will be committed again, even if the commit was partially successful.
   If the retry limit is exceeded, the last exception from Cloud Datastore will
   be raised.
+
+  Args:
+    datastore: googledatastore.connection.Datastore
+    project: str, project id
+    mutations: list of google.cloud.proto.datastore.v1.datastore_pb2.Mutation
+    rpc_stats_callback: a function to call with arguments `successes` and
+        `failures`; this is called to record successful and failed RPCs to
+        Datastore.
+
+  Returns a tuple of:
+    CommitResponse, the response from Datastore;
+    int, the latency of the successful RPC in milliseconds.
   """
   commit_request = datastore_pb2.CommitRequest()
   commit_request.mode = datastore_pb2.CommitRequest.NON_TRANSACTIONAL
@@ -181,10 +195,22 @@ def write_mutations(datastore, project, mutations):
 
   @retry.with_exponential_backoff(num_retries=5,
                                   retry_filter=retry_on_rpc_error)
-  def commit(req):
-    datastore.commit(req)
+  def commit(request):
+    try:
+      start_time = time.time()
+      response = datastore.commit(request)
+      end_time = time.time()
+      rpc_stats_callback(successes=1)
 
-  commit(commit_request)
+      commit_time_ms = int((end_time-start_time)*1000)
+      return response, commit_time_ms
+    except (RPCError, SocketError):
+      if rpc_stats_callback:
+        rpc_stats_callback(errors=1)
+      raise
+
+  response, commit_time_ms = commit(commit_request)
+  return response, commit_time_ms
 
 
 def make_latest_timestamp_query(namespace):
@@ -227,7 +253,6 @@ class QueryIterator(object):
 
   Entities are read in batches. Retries on failures.
   """
-  _NOT_FINISHED = QUERY_NOT_FINISHED
   # Maximum number of results to request per query.
   _BATCH_SIZE = 500
 
@@ -271,4 +296,5 @@ class QueryIterator(object):
       # read).
       more_results = ((self._limit > 0) and
                       ((num_results == self._BATCH_SIZE) or
-                       (resp.batch.more_results == self._NOT_FINISHED)))
+                       (resp.batch.more_results ==
+                        query_pb2.QueryResultBatch.NOT_FINISHED)))

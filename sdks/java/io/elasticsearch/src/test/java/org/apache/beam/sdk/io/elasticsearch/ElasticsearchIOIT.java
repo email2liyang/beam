@@ -24,6 +24,7 @@ import static org.junit.Assert.assertEquals;
 
 import java.util.List;
 import org.apache.beam.sdk.io.BoundedSource;
+import org.apache.beam.sdk.io.common.IOTestPipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.SourceTestUtils;
@@ -31,7 +32,7 @@ import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.values.PCollection;
-import org.elasticsearch.client.transport.TransportClient;
+import org.elasticsearch.client.RestClient;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Rule;
@@ -55,26 +56,26 @@ import org.slf4j.LoggerFactory;
  * </pre>
  */
 public class ElasticsearchIOIT {
-  private static final Logger LOGGER = LoggerFactory.getLogger(ElasticsearchIOIT.class);
-  private static TransportClient client;
-  private static ElasticsearchTestOptions options;
+  private static final Logger LOG = LoggerFactory.getLogger(ElasticsearchIOIT.class);
+  private static  RestClient restClient;
+  private static IOTestPipelineOptions options;
   private static ElasticsearchIO.ConnectionConfiguration readConnectionConfiguration;
   @Rule public TestPipeline pipeline = TestPipeline.create();
 
   @BeforeClass
   public static void beforeClass() throws Exception {
-    PipelineOptionsFactory.register(ElasticsearchTestOptions.class);
-    options = TestPipeline.testingPipelineOptions().as(ElasticsearchTestOptions.class);
-    client = ElasticsearchTestDataSet.getClient(options);
+    PipelineOptionsFactory.register(IOTestPipelineOptions.class);
+    options = TestPipeline.testingPipelineOptions().as(IOTestPipelineOptions.class);
     readConnectionConfiguration =
         ElasticsearchTestDataSet.getConnectionConfiguration(
             options, ElasticsearchTestDataSet.ReadOrWrite.READ);
+    restClient = readConnectionConfiguration.createClient();
   }
 
   @AfterClass
   public static void afterClass() throws Exception {
-    ElasticsearchTestDataSet.deleteIndex(client, ElasticsearchTestDataSet.ReadOrWrite.WRITE);
-    client.close();
+    ElasticsearchTestDataSet.deleteIndex(restClient, ElasticsearchTestDataSet.ReadOrWrite.WRITE);
+    restClient.close();
   }
 
   @Test
@@ -87,7 +88,7 @@ public class ElasticsearchIOIT {
     // as many bundles as ES shards and bundle size is shard size
     long desiredBundleSizeBytes = 0;
     List<? extends BoundedSource<String>> splits =
-        initialSource.splitIntoBundles(desiredBundleSizeBytes, options);
+        initialSource.split(desiredBundleSizeBytes, options);
     SourceTestUtils.assertSourcesEqualReferenceSource(initialSource, splits, options);
     //this is the number of ES shards
     // (By default, each index in Elasticsearch is allocated 5 primary shards)
@@ -127,8 +128,8 @@ public class ElasticsearchIOIT {
     pipeline.run();
 
     long currentNumDocs =
-        ElasticSearchIOTestUtils.upgradeIndexAndGetCurrentNumDocs(
-            ElasticsearchTestDataSet.ES_INDEX, ElasticsearchTestDataSet.ES_TYPE, client);
+        ElasticSearchIOTestUtils.refreshIndexAndGetCurrentNumDocs(
+            ElasticsearchTestDataSet.ES_INDEX, ElasticsearchTestDataSet.ES_TYPE, restClient);
     assertEquals(ElasticsearchTestDataSet.NUM_DOCS, currentNumDocs);
   }
 
@@ -141,7 +142,7 @@ public class ElasticsearchIOIT {
     // can't use equal assert as Elasticsearch indexes never have same size
     // (due to internal Elasticsearch implementation)
     long estimatedSize = initialSource.getEstimatedSizeBytes(options);
-    LOGGER.info("Estimated size: {}", estimatedSize);
+    LOG.info("Estimated size: {}", estimatedSize);
     assertThat(
         "Wrong estimated size bellow minimum",
         estimatedSize,

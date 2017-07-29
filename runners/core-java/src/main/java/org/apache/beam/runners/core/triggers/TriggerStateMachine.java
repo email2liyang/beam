@@ -24,10 +24,10 @@ import java.util.Objects;
 import javax.annotation.Nullable;
 import org.apache.beam.runners.core.MergingStateAccessor;
 import org.apache.beam.runners.core.StateAccessor;
+import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
-import org.apache.beam.sdk.util.TimeDomain;
 import org.joda.time.Instant;
 
 /**
@@ -453,35 +453,8 @@ public abstract class TriggerStateMachine implements Serializable {
    * }
    * </pre>
    *
-   * <p>Note that if {@code t1} is {@link OnceTriggerStateMachine}, then {@code t1.orFinally(t2)} is
-   * the same as {@code AfterFirst.of(t1, t2)}.
    */
   public TriggerStateMachine orFinally(TriggerStateMachine until) {
     return new OrFinallyStateMachine(this, until);
-  }
-
-  /**
-   * {@link TriggerStateMachine}s that are guaranteed to fire at most once should extend from this,
-   * rather than the general {@link TriggerStateMachine} class to indicate that behavior.
-   */
-  public abstract static class OnceTriggerStateMachine extends TriggerStateMachine {
-    protected OnceTriggerStateMachine(List<TriggerStateMachine> subTriggers) {
-      super(subTriggers);
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public final void onFire(TriggerContext context) throws Exception {
-      onOnlyFiring(context);
-      context.trigger().setFinished(true);
-    }
-
-    /**
-     * Called exactly once by {@link #onFire} when the trigger is fired. By default,
-     * invokes {@link #onFire} on all subtriggers for which {@link #shouldFire} is {@code true}.
-     */
-    protected abstract void onOnlyFiring(TriggerContext context) throws Exception;
   }
 }

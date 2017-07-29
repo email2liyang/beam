@@ -15,7 +15,9 @@
 # limitations under the License.
 #
 
-"""Dataflow client utility functions."""
+""" For internal use only. No backwards compatibility guarantees.
+
+Dataflow client utility functions."""
 
 import codecs
 import getpass
@@ -30,22 +32,28 @@ from datetime import datetime
 from apitools.base.py import encoding
 from apitools.base.py import exceptions
 
-from apache_beam import utils
 from apache_beam.internal.gcp.auth import get_service_credentials
 from apache_beam.internal.gcp.json_value import to_json_value
+from apache_beam.io.filesystems import FileSystems
 from apache_beam.io.gcp.internal.clients import storage
 from apache_beam.runners.dataflow.internal import dependency
 from apache_beam.runners.dataflow.internal.clients import dataflow
-from apache_beam.runners.dataflow.internal.dependency import get_required_container_version
 from apache_beam.runners.dataflow.internal.dependency import get_sdk_name_and_version
 from apache_beam.runners.dataflow.internal.names import PropertyNames
 from apache_beam.transforms import cy_combiners
 from apache_beam.transforms.display import DisplayData
 from apache_beam.utils import retry
-from apache_beam.utils.pipeline_options import DebugOptions
-from apache_beam.utils.pipeline_options import GoogleCloudOptions
-from apache_beam.utils.pipeline_options import StandardOptions
-from apache_beam.utils.pipeline_options import WorkerOptions
+from apache_beam.options.pipeline_options import DebugOptions
+from apache_beam.options.pipeline_options import GoogleCloudOptions
+from apache_beam.options.pipeline_options import StandardOptions
+from apache_beam.options.pipeline_options import WorkerOptions
+
+
+# Environment version information. It is passed to the service during a
+# a job submission and is used by the service to establish what features
+# are expected by the workers.
+_LEGACY_ENVIRONMENT_MAJOR_VERSION = '6'
+_FNAPI_ENVIRONMENT_MAJOR_VERSION = '1'
 
 
 class Step(object):
@@ -143,9 +151,12 @@ class Environment(object):
     # Version information.
     self.proto.version = dataflow.Environment.VersionValue()
     if self.standard_options.streaming:
-      job_type = 'PYTHON_STREAMING'
+      job_type = 'FNAPI_STREAMING'
     else:
-      job_type = 'PYTHON_BATCH'
+      if _use_fnapi(options):
+        job_type = 'FNAPI_BATCH'
+      else:
+        job_type = 'PYTHON_BATCH'
     self.proto.version.additionalProperties.extend([
         dataflow.Environment.VersionValue.AdditionalProperty(
             key='job_type',
@@ -197,15 +208,14 @@ class Environment(object):
       pool.zone = self.worker_options.zone
     if self.worker_options.network:
       pool.network = self.worker_options.network
+    if self.worker_options.subnetwork:
+      pool.subnetwork = self.worker_options.subnetwork
     if self.worker_options.worker_harness_container_image:
       pool.workerHarnessContainerImage = (
           self.worker_options.worker_harness_container_image)
     else:
-      # Default to using the worker harness container image for the current SDK
-      # version.
       pool.workerHarnessContainerImage = (
-          'dataflow.gcr.io/v1beta3/python:%s' %
-          get_required_container_version())
+          dependency.get_default_container_image_for_current_sdk(job_type))
     if self.worker_options.use_public_ips is not None:
       if self.worker_options.use_public_ips:
         pool.ipConfiguration = (
@@ -285,12 +295,25 @@ class Job(object):
         indent=2, sort_keys=True)
 
   @staticmethod
+  def _build_default_job_name(user_name):
+    """Generates a default name for a job.
+
+    user_name is lowercased, and any characters outside of [-a-z0-9]
+    are removed. If necessary, the user_name is truncated to shorten
+    the job name to 63 characters."""
+    user_name = re.sub('[^-a-z0-9]', '', user_name.lower())
+    date_component = datetime.utcnow().strftime('%m%d%H%M%S-%f')
+    app_user_name = 'beamapp-{}'.format(user_name)
+    job_name = '{}-{}'.format(app_user_name, date_component)
+    if len(job_name) > 63:
+      job_name = '{}-{}'.format(app_user_name[:-(len(job_name) - 63)],
+                                date_component)
+    return job_name
+
+  @staticmethod
   def default_job_name(job_name):
     if job_name is None:
-      user_name = getpass.getuser().lower()
-      date_component = datetime.utcnow().strftime('%m%d%H%M%S-%f')
-      app_name = 'beamapp'
-      job_name = '{}-{}-{}'.format(app_name, user_name, date_component)
+      job_name = Job._build_default_job_name(getpass.getuser())
     return job_name
 
   def __init__(self, options):
@@ -323,10 +346,11 @@ class Job(object):
     # for GCS staging locations where the potential for such clashes is high.
     if self.google_cloud_options.staging_location.startswith('gs://'):
       path_suffix = '%s.%f' % (self.google_cloud_options.job_name, time.time())
-      self.google_cloud_options.staging_location = utils.path.join(
+      self.google_cloud_options.staging_location = FileSystems.join(
           self.google_cloud_options.staging_location, path_suffix)
-      self.google_cloud_options.temp_location = utils.path.join(
+      self.google_cloud_options.temp_location = FileSystems.join(
           self.google_cloud_options.temp_location, path_suffix)
+
     self.proto = dataflow.Job(name=self.google_cloud_options.job_name)
     if self.options.view_as(StandardOptions).streaming:
       self.proto.type = dataflow.Job.TypeValueValuesEnum.JOB_TYPE_STREAMING
@@ -346,11 +370,16 @@ class Job(object):
 class DataflowApplicationClient(object):
   """A Dataflow API client used by application code to create and query jobs."""
 
-  def __init__(self, options, environment_version):
+  def __init__(self, options):
     """Initializes a Dataflow API client object."""
     self.standard_options = options.view_as(StandardOptions)
     self.google_cloud_options = options.view_as(GoogleCloudOptions)
-    self.environment_version = environment_version
+
+    if _use_fnapi(options):
+      self.environment_version = _FNAPI_ENVIRONMENT_MAJOR_VERSION
+    else:
+      self.environment_version = _LEGACY_ENVIRONMENT_MAJOR_VERSION
+
     if self.google_cloud_options.no_auth:
       credentials = None
     else:
@@ -375,12 +404,12 @@ class DataflowApplicationClient(object):
                  mime_type='application/octet-stream'):
     """Stages a file at a GCS or local path with stream-supplied contents."""
     if not gcs_or_local_path.startswith('gs://'):
-      local_path = os.path.join(gcs_or_local_path, file_name)
+      local_path = FileSystems.join(gcs_or_local_path, file_name)
       logging.info('Staging file locally to %s', local_path)
       with open(local_path, 'wb') as f:
         f.write(stream.read())
       return
-    gcs_location = gcs_or_local_path + '/' + file_name
+    gcs_location = FileSystems.join(gcs_or_local_path, file_name)
     bucket, name = gcs_location[5:].split('/', 1)
 
     request = storage.StorageObjectsInsertRequest(
@@ -397,14 +426,12 @@ class DataflowApplicationClient(object):
       if e.status_code in reportable_errors:
         raise IOError(('Could not upload to GCS path %s: %s. Please verify '
                        'that credentials are valid and that you have write '
-                       'access to the specified path. Stale credentials can be '
-                       'refreshed by executing "gcloud auth login".') %
+                       'access to the specified path.') %
                       (gcs_or_local_path, reportable_errors[e.status_code]))
       raise
     logging.info('Completed GCS upload to %s', gcs_location)
     return response
 
-  # TODO(silviuc): Refactor so that retry logic can be applied.
   @retry.no_retries  # Using no_retries marks this as an integration point.
   def create_job(self, job):
     """Creates job description. May stage and/or submit for remote execution."""
@@ -423,8 +450,10 @@ class DataflowApplicationClient(object):
 
     if not template_location:
       return self.submit_job_description(job)
-    else:
-      return None
+
+    logging.info('A template was just created at location %s',
+                 template_location)
+    return None
 
   def create_job_description(self, job):
     """Creates a job described by the workflow proto."""
@@ -433,30 +462,32 @@ class DataflowApplicationClient(object):
     job.proto.environment = Environment(
         packages=resources, options=job.options,
         environment_version=self.environment_version).proto
-    # TODO(silviuc): Remove the debug logging eventually.
-    logging.info('JOB: %s', job)
+    logging.debug('JOB: %s', job)
 
   @retry.with_exponential_backoff(num_retries=3, initial_delay_secs=3)
   def get_job_metrics(self, job_id):
-    request = dataflow.DataflowProjectsJobsGetMetricsRequest()
+    request = dataflow.DataflowProjectsLocationsJobsGetMetricsRequest()
     request.jobId = job_id
+    request.location = self.google_cloud_options.region
     request.projectId = self.google_cloud_options.project
     try:
-      response = self._client.projects_jobs.GetMetrics(request)
+      response = self._client.projects_locations_jobs.GetMetrics(request)
     except exceptions.BadStatusCodeError as e:
       logging.error('HTTP status %d. Unable to query metrics',
                     e.response.status)
       raise
     return response
 
+  @retry.with_exponential_backoff(num_retries=3)
   def submit_job_description(self, job):
     """Creates and excutes a job request."""
-    request = dataflow.DataflowProjectsJobsCreateRequest()
+    request = dataflow.DataflowProjectsLocationsJobsCreateRequest()
     request.projectId = self.google_cloud_options.project
+    request.location = self.google_cloud_options.region
     request.job = job.proto
 
     try:
-      response = self._client.projects_jobs.Create(request)
+      response = self._client.projects_locations_jobs.Create(request)
     except exceptions.BadStatusCodeError as e:
       logging.error('HTTP status %d trying to create job'
                     ' at dataflow service endpoint %s',
@@ -469,8 +500,11 @@ class DataflowApplicationClient(object):
     logging.info('Created job with id: [%s]', response.id)
     logging.info(
         'To access the Dataflow monitoring console, please navigate to '
-        'https://console.developers.google.com/project/%s/dataflow/job/%s',
-        self.google_cloud_options.project, response.id)
+        'https://console.cloud.google.com/dataflow/jobsDetail'
+        '/locations/%s/jobs/%s?project=%s',
+        self.google_cloud_options.region,
+        response.id,
+        self.google_cloud_options.project)
 
     return response
 
@@ -496,9 +530,10 @@ class DataflowApplicationClient(object):
       # Other states could only be set by the service.
       return False
 
-    request = dataflow.DataflowProjectsJobsUpdateRequest()
+    request = dataflow.DataflowProjectsLocationsJobsUpdateRequest()
     request.jobId = job_id
     request.projectId = self.google_cloud_options.project
+    request.location = self.google_cloud_options.region
     request.job = dataflow.Job(requestedState=new_state)
 
     self._client.projects_jobs.Update(request)
@@ -526,10 +561,11 @@ class DataflowApplicationClient(object):
         (e.g. '2015-03-10T00:01:53.074Z')
       currentStateTime: UTC time for the current state of the job.
     """
-    request = dataflow.DataflowProjectsJobsGetRequest()
+    request = dataflow.DataflowProjectsLocationsJobsGetRequest()
     request.jobId = job_id
     request.projectId = self.google_cloud_options.project
-    response = self._client.projects_jobs.Get(request)
+    request.location = self.google_cloud_options.region
+    response = self._client.projects_locations_jobs.Get(request)
     return response
 
   @retry.with_exponential_backoff()  # Using retry defaults from utils/retry.py
@@ -575,8 +611,9 @@ class DataflowApplicationClient(object):
         JOB_MESSAGE_WARNING, JOB_MESSAGE_ERROR.
      messageText: A message string.
     """
-    request = dataflow.DataflowProjectsJobsMessagesListRequest(
-        jobId=job_id, projectId=self.google_cloud_options.project)
+    request = dataflow.DataflowProjectsLocationsJobsMessagesListRequest(
+        jobId=job_id, location=self.google_cloud_options.region,
+        projectId=self.google_cloud_options.project)
     if page_token is not None:
       request.pageToken = page_token
     if start_time is not None:
@@ -586,34 +623,34 @@ class DataflowApplicationClient(object):
     if minimum_importance is not None:
       if minimum_importance == 'JOB_MESSAGE_DEBUG':
         request.minimumImportance = (
-            dataflow.DataflowProjectsJobsMessagesListRequest
+            dataflow.DataflowProjectsLocationsJobsMessagesListRequest
             .MinimumImportanceValueValuesEnum
             .JOB_MESSAGE_DEBUG)
       elif minimum_importance == 'JOB_MESSAGE_DETAILED':
         request.minimumImportance = (
-            dataflow.DataflowProjectsJobsMessagesListRequest
+            dataflow.DataflowProjectsLocationsJobsMessagesListRequest
             .MinimumImportanceValueValuesEnum
             .JOB_MESSAGE_DETAILED)
       elif minimum_importance == 'JOB_MESSAGE_BASIC':
         request.minimumImportance = (
-            dataflow.DataflowProjectsJobsMessagesListRequest
+            dataflow.DataflowProjectsLocationsJobsMessagesListRequest
             .MinimumImportanceValueValuesEnum
             .JOB_MESSAGE_BASIC)
       elif minimum_importance == 'JOB_MESSAGE_WARNING':
         request.minimumImportance = (
-            dataflow.DataflowProjectsJobsMessagesListRequest
+            dataflow.DataflowProjectsLocationsJobsMessagesListRequest
             .MinimumImportanceValueValuesEnum
             .JOB_MESSAGE_WARNING)
       elif minimum_importance == 'JOB_MESSAGE_ERROR':
         request.minimumImportance = (
-            dataflow.DataflowProjectsJobsMessagesListRequest
+            dataflow.DataflowProjectsLocationsJobsMessagesListRequest
             .MinimumImportanceValueValuesEnum
             .JOB_MESSAGE_ERROR)
       else:
         raise RuntimeError(
             'Unexpected value for minimum_importance argument: %r',
             minimum_importance)
-    response = self._client.projects_jobs_messages.List(request)
+    response = self._client.projects_locations_jobs_messages.List(request)
     return response.jobMessages, response.nextPageToken
 
 
@@ -685,6 +722,14 @@ def translate_mean(accumulator, metric_update):
     # A denominator of 0 will raise an error in the service.
     # What it means is we have nothing to report yet, so don't.
     metric_update.kind = None
+
+
+def _use_fnapi(pipeline_options):
+  standard_options = pipeline_options.view_as(StandardOptions)
+  debug_options = pipeline_options.view_as(DebugOptions)
+
+  return standard_options.streaming or (
+      debug_options.experiments and 'beam_fn_api' in debug_options.experiments)
 
 
 # To enable a counter on the service, add it to this dictionary.

@@ -25,13 +25,14 @@ import static org.junit.Assert.assertTrue;
 import com.google.common.base.Predicates;
 import com.google.common.collect.Iterables;
 import java.util.List;
-import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.StructuredCoder;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.DoFn.BoundedPerElement;
 import org.apache.beam.sdk.transforms.DoFn.UnboundedPerElement;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignaturesTestUtils.AnonymousMethod;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignaturesTestUtils.FakeDoFn;
+import org.apache.beam.sdk.transforms.splittabledofn.HasDefaultTracker;
 import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.PCollection;
@@ -51,12 +52,13 @@ import org.junit.runners.JUnit4;
 public class DoFnSignaturesSplittableDoFnTest {
   @Rule public ExpectedException thrown = ExpectedException.none();
 
-  private static class SomeRestriction {}
+  private abstract static class SomeRestriction
+      implements HasDefaultTracker<SomeRestriction, SomeRestrictionTracker> {}
 
   private abstract static class SomeRestrictionTracker
       implements RestrictionTracker<SomeRestriction> {}
 
-  private abstract static class SomeRestrictionCoder implements Coder<SomeRestriction> {}
+  private abstract static class SomeRestrictionCoder extends StructuredCoder<SomeRestriction> {}
 
   @Test
   public void testReturnsProcessContinuation() throws Exception {
@@ -113,11 +115,6 @@ public class DoFnSignaturesSplittableDoFnTest {
       public SomeRestriction getInitialRestriction(Integer element) {
         return null;
       }
-
-      @NewTracker
-      public SomeRestrictionTracker newTracker(SomeRestriction restriction) {
-        return null;
-      }
     }
 
     @BoundedPerElement
@@ -143,17 +140,14 @@ public class DoFnSignaturesSplittableDoFnTest {
             .isBoundedPerElement());
   }
 
-  @Test
-  public void testUnsplittableIsBounded() throws Exception {
-    class UnsplittableFn extends DoFn<Integer, String> {
-      @ProcessElement
-      public void process(ProcessContext context) {}
+  private static class BaseFnWithoutContinuation extends DoFn<Integer, String> {
+    @ProcessElement
+    public void processElement(ProcessContext context, SomeRestrictionTracker tracker) {}
+
+    @GetInitialRestriction
+    public SomeRestriction getInitialRestriction(Integer element) {
+      return null;
     }
-    assertEquals(
-        PCollection.IsBounded.BOUNDED,
-        DoFnSignatures
-            .getSignature(UnsplittableFn.class)
-            .isBoundedPerElement());
   }
 
   private static class BaseFnWithContinuation extends DoFn<Integer, String> {
@@ -167,20 +161,16 @@ public class DoFnSignaturesSplittableDoFnTest {
     public SomeRestriction getInitialRestriction(Integer element) {
       return null;
     }
-
-    @NewTracker
-    public SomeRestrictionTracker newTracker(SomeRestriction restriction) {
-      return null;
-    }
   }
 
   @Test
-  public void testSplittableIsBoundedByDefault() throws Exception {
+  public void testSplittableBoundednessInferredFromReturnValue() throws Exception {
+    assertEquals(
+        PCollection.IsBounded.BOUNDED,
+        DoFnSignatures.getSignature(BaseFnWithoutContinuation.class).isBoundedPerElement());
     assertEquals(
         PCollection.IsBounded.UNBOUNDED,
-        DoFnSignatures
-            .getSignature(BaseFnWithContinuation.class)
-            .isBoundedPerElement());
+        DoFnSignatures.getSignature(BaseFnWithContinuation.class).isBoundedPerElement());
   }
 
   @Test
@@ -190,17 +180,25 @@ public class DoFnSignaturesSplittableDoFnTest {
 
     assertEquals(
         PCollection.IsBounded.BOUNDED,
-        DoFnSignatures
-            .getSignature(BoundedFnWithContinuation.class)
-            .isBoundedPerElement());
+        DoFnSignatures.getSignature(BoundedFnWithContinuation.class).isBoundedPerElement());
 
     @UnboundedPerElement
     class UnboundedFnWithContinuation extends BaseFnWithContinuation {}
 
     assertEquals(
         PCollection.IsBounded.UNBOUNDED,
+        DoFnSignatures.getSignature(UnboundedFnWithContinuation.class).isBoundedPerElement());
+  }
+  @Test
+  public void testUnsplittableIsBounded() throws Exception {
+    class UnsplittableFn extends DoFn<Integer, String> {
+      @ProcessElement
+      public void process(ProcessContext context) {}
+    }
+    assertEquals(
+        PCollection.IsBounded.BOUNDED,
         DoFnSignatures
-            .getSignature(UnboundedFnWithContinuation.class)
+            .getSignature(UnsplittableFn.class)
             .isBoundedPerElement());
   }
 
@@ -328,6 +326,48 @@ public class DoFnSignaturesSplittableDoFnTest {
         "Splittable, but does not define the following required methods: "
             + "[@GetInitialRestriction, @NewTracker]");
     DoFnSignatures.getSignature(BadFn.class);
+  }
+
+  abstract class SomeDefaultTracker implements RestrictionTracker<RestrictionWithDefaultTracker> {}
+  abstract class RestrictionWithDefaultTracker
+      implements HasDefaultTracker<RestrictionWithDefaultTracker, SomeDefaultTracker> {}
+
+  @Test
+  public void testHasDefaultTracker() throws Exception {
+    class Fn extends DoFn<Integer, String> {
+      @ProcessElement
+      public void process(ProcessContext c, SomeDefaultTracker tracker) {}
+
+      @GetInitialRestriction
+      public RestrictionWithDefaultTracker getInitialRestriction(Integer element) {
+        return null;
+      }
+    }
+
+    DoFnSignature signature = DoFnSignatures.getSignature(Fn.class);
+    assertEquals(
+        SomeDefaultTracker.class, signature.processElement().trackerT().getRawType());
+  }
+
+  @Test
+  public void testRestrictionHasDefaultTrackerProcessUsesWrongTracker() throws Exception {
+    class Fn extends DoFn<Integer, String> {
+      @ProcessElement
+      public void process(ProcessContext c, SomeRestrictionTracker tracker) {}
+
+      @GetInitialRestriction
+      public RestrictionWithDefaultTracker getInitialRestriction(Integer element) {
+        return null;
+      }
+    }
+
+    thrown.expectMessage(
+        "Has tracker type SomeRestrictionTracker, but the DoFn's tracker type was inferred as ");
+    thrown.expectMessage("SomeDefaultTracker");
+    thrown.expectMessage(
+        "from restriction type RestrictionWithDefaultTracker "
+            + "of @GetInitialRestriction method getInitialRestriction(Integer)");
+    DoFnSignatures.getSignature(Fn.class);
   }
 
   @Test

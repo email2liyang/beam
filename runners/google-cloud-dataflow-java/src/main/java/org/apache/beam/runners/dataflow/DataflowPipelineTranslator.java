@@ -21,18 +21,18 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.isNullOrEmpty;
+import static org.apache.beam.runners.dataflow.util.Structs.addBoolean;
+import static org.apache.beam.runners.dataflow.util.Structs.addDictionary;
+import static org.apache.beam.runners.dataflow.util.Structs.addList;
+import static org.apache.beam.runners.dataflow.util.Structs.addLong;
+import static org.apache.beam.runners.dataflow.util.Structs.addObject;
+import static org.apache.beam.runners.dataflow.util.Structs.addString;
+import static org.apache.beam.runners.dataflow.util.Structs.getString;
 import static org.apache.beam.sdk.util.SerializableUtils.serializeToByteArray;
 import static org.apache.beam.sdk.util.StringUtils.byteArrayToJsonString;
-import static org.apache.beam.sdk.util.StringUtils.jsonStringToByteArray;
-import static org.apache.beam.sdk.util.Structs.addBoolean;
-import static org.apache.beam.sdk.util.Structs.addDictionary;
-import static org.apache.beam.sdk.util.Structs.addList;
-import static org.apache.beam.sdk.util.Structs.addLong;
-import static org.apache.beam.sdk.util.Structs.addObject;
-import static org.apache.beam.sdk.util.Structs.addString;
-import static org.apache.beam.sdk.util.Structs.getString;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.services.dataflow.model.AutoscalingSettings;
 import com.google.api.services.dataflow.model.DataflowPackage;
@@ -49,7 +49,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -57,28 +56,35 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.Nullable;
+import org.apache.beam.runners.core.construction.SplittableParDo;
+import org.apache.beam.runners.core.construction.TransformInputs;
+import org.apache.beam.runners.core.construction.WindowingStrategyTranslation;
 import org.apache.beam.runners.dataflow.BatchViewOverrides.GroupByKeyAndSortValuesOnly;
 import org.apache.beam.runners.dataflow.DataflowRunner.CombineGroupedValues;
+import org.apache.beam.runners.dataflow.PrimitiveParDoSingleFactory.ParDoSingle;
 import org.apache.beam.runners.dataflow.TransformTranslator.StepTranslationContext;
 import org.apache.beam.runners.dataflow.TransformTranslator.TranslationContext;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
+import org.apache.beam.runners.dataflow.util.CloudObject;
+import org.apache.beam.runners.dataflow.util.CloudObjects;
 import org.apache.beam.runners.dataflow.util.DoFnInfo;
 import org.apache.beam.runners.dataflow.util.OutputReference;
+import org.apache.beam.runners.dataflow.util.PropertyNames;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.Pipeline.PipelineVisitor;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.io.Read;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.StreamingOptions;
+import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.runners.TransformHierarchy;
-import org.apache.beam.sdk.transforms.AppliedPTransform;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
 import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.transforms.display.HasDisplayData;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature;
@@ -86,20 +92,16 @@ import org.apache.beam.sdk.transforms.reflect.DoFnSignatures;
 import org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.util.AppliedCombineFn;
-import org.apache.beam.sdk.util.CloudObject;
-import org.apache.beam.sdk.util.PropertyNames;
-import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.util.WindowingStrategy;
+import org.apache.beam.sdk.util.common.ReflectHelpers;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.PValue;
-import org.apache.beam.sdk.values.TaggedPValue;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.sdk.values.TypedPValue;
+import org.apache.beam.sdk.values.WindowingStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -113,6 +115,23 @@ public class DataflowPipelineTranslator {
   // Must be kept in sync with their internal counterparts.
   private static final Logger LOG = LoggerFactory.getLogger(DataflowPipelineTranslator.class);
   private static final ObjectMapper MAPPER = new ObjectMapper();
+
+  /**
+   * Use an {@link ObjectMapper} configured with any {@link Module}s in the class path allowing
+   * for user specified configuration injection into the ObjectMapper. This supports user custom
+   * types on {@link PipelineOptions}.
+   */
+  private static final ObjectMapper MAPPER_WITH_MODULES = new ObjectMapper().registerModules(
+      ObjectMapper.findModules(ReflectHelpers.findClassLoader()));
+
+  private static byte[] serializeWindowingStrategy(WindowingStrategy<?, ?> windowingStrategy) {
+    try {
+      return WindowingStrategyTranslation.toProto(windowingStrategy).toByteArray();
+    } catch (Exception e) {
+      throw new RuntimeException(
+          String.format("Unable to format windowing strategy %s as bytes", windowingStrategy), e);
+    }
+  }
 
   /**
    * A map from {@link PTransform} subclass to the corresponding
@@ -297,7 +316,7 @@ public class DataflowPipelineTranslator {
 
       try {
         environment.setSdkPipelineOptions(
-            MAPPER.readValue(MAPPER.writeValueAsBytes(options), Map.class));
+            MAPPER.readValue(MAPPER_WITH_MODULES.writeValueAsBytes(options), Map.class));
       } catch (IOException e) {
         throw new IllegalArgumentException(
             "PipelineOptions specified failed to serialize to JSON.", e);
@@ -327,8 +346,7 @@ public class DataflowPipelineTranslator {
       workerPool.setNumWorkers(options.getNumWorkers());
 
       if (options.isStreaming()
-          && (options.getExperiments() == null
-              || !options.getExperiments().contains("enable_windmill_service"))) {
+          && !DataflowRunner.hasExperiment(options, "enable_windmill_service")) {
         // Use separate data disk for streaming.
         Disk disk = new Disk();
         disk.setDiskType(options.getWorkerDiskType());
@@ -372,24 +390,27 @@ public class DataflowPipelineTranslator {
     }
 
     @Override
-    public <InputT extends PInput> List<TaggedPValue> getInputs(PTransform<InputT, ?> transform) {
+    public <InputT extends PInput> Map<TupleTag<?>, PValue> getInputs(
+        PTransform<InputT, ?> transform) {
       return getCurrentTransform(transform).getInputs();
     }
 
     @Override
     public <InputT extends PValue> InputT getInput(PTransform<InputT, ?> transform) {
-      return (InputT) Iterables.getOnlyElement(getInputs(transform)).getValue();
+      return (InputT)
+          Iterables.getOnlyElement(
+              TransformInputs.nonAdditionalInputs(getCurrentTransform(transform)));
     }
 
     @Override
-    public <OutputT extends POutput> List<TaggedPValue> getOutputs(
+    public <OutputT extends POutput> Map<TupleTag<?>, PValue> getOutputs(
         PTransform<?, OutputT> transform) {
       return getCurrentTransform(transform).getOutputs();
     }
 
     @Override
     public <OutputT extends PValue> OutputT getOutput(PTransform<?, OutputT> transform) {
-      return (OutputT) Iterables.getOnlyElement(getOutputs(transform)).getValue();
+      return (OutputT) Iterables.getOnlyElement(getOutputs(transform).values());
     }
 
     @Override
@@ -409,21 +430,29 @@ public class DataflowPipelineTranslator {
       PTransform<?, ?> transform = node.getTransform();
       TransformTranslator translator = getTransformTranslator(transform.getClass());
       checkState(
-          translator != null, "no translator registered for primitive transform %s", transform);
+          translator != null,
+          "no translator registered for primitive transform %s at node %s",
+          transform,
+          node.getFullName());
       LOG.debug("Translating {}", transform);
-      currentTransform = node.toAppliedPTransform();
+      currentTransform = node.toAppliedPTransform(getPipeline());
       translator.translate(transform, this);
       currentTransform = null;
     }
 
     @Override
     public void visitValue(PValue value, TransformHierarchy.Node producer) {
-      producers.put(value, producer.toAppliedPTransform());
       LOG.debug("Checking translation of {}", value);
-      if (!producer.isCompositeNode()) {
-        // Primitive transforms are the only ones assigned step names.
-        asOutputReference(value, producer.toAppliedPTransform());
+      // Primitive transforms are the only ones assigned step names.
+      if (producer.getTransform() instanceof CreateDataflowView) {
+        // CreateDataflowView produces a dummy output (as it must be a primitive transform) but
+        // in the Dataflow Job graph produces only the view and not the output PCollection.
+        asOutputReference(
+            ((CreateDataflowView) producer.getTransform()).getView(),
+            producer.toAppliedPTransform(getPipeline()));
+        return;
       }
+      asOutputReference(value, producer.toAppliedPTransform(getPipeline()));
     }
 
     @Override
@@ -448,49 +477,8 @@ public class DataflowPipelineTranslator {
       StepTranslator stepContext = new StepTranslator(this, step);
       stepContext.addInput(PropertyNames.USER_NAME, getFullName(transform));
       stepContext.addDisplayData(step, stepName, transform);
+      LOG.info("Adding {} as step {}", getCurrentTransform(transform).getFullName(), stepName);
       return stepContext;
-    }
-
-    @Override
-    public Step addStep(PTransform<?, ? extends PValue> transform, Step original) {
-      Step step = original.clone();
-      String stepName = step.getName();
-      if (stepNames.put(getCurrentTransform(transform), stepName) != null) {
-        throw new IllegalArgumentException(transform + " already has a name specified");
-      }
-
-      Map<String, Object> properties = step.getProperties();
-      if (properties != null) {
-        @Nullable List<Map<String, Object>> outputInfoList = null;
-        try {
-          // TODO: This should be done via a Structs accessor.
-          @Nullable List<Map<String, Object>> list =
-              (List<Map<String, Object>>) properties.get(PropertyNames.OUTPUT_INFO);
-          outputInfoList = list;
-        } catch (Exception e) {
-          throw new RuntimeException("Inconsistent dataflow pipeline translation", e);
-        }
-        if (outputInfoList != null && outputInfoList.size() > 0) {
-          Map<String, Object> firstOutputPort = outputInfoList.get(0);
-          @Nullable String name;
-          try {
-            name = getString(firstOutputPort, PropertyNames.OUTPUT_NAME);
-          } catch (Exception e) {
-            name = null;
-          }
-          if (name != null) {
-            registerOutputName(getOutput(transform), name);
-          }
-        }
-      }
-
-      List<Step> steps = job.getSteps();
-      if (steps == null) {
-        steps = new LinkedList<>();
-        job.setSteps(steps);
-      }
-      steps.add(step);
-      return step;
     }
 
     public OutputReference asOutputReference(PValue value, AppliedPTransform<?, ?, ?> producer) {
@@ -547,7 +535,7 @@ public class DataflowPipelineTranslator {
 
     @Override
     public void addEncodingInput(Coder<?> coder) {
-      CloudObject encoding = SerializableUtils.ensureSerializable(coder);
+      CloudObject encoding = CloudObjects.asCloudObject(coder);
       addObject(getProperties(), PropertyNames.ENCODING, encoding);
     }
 
@@ -587,26 +575,19 @@ public class DataflowPipelineTranslator {
     }
 
     @Override
-    public long addOutput(PValue value) {
-      Coder<?> coder;
-      if (value instanceof TypedPValue) {
-        coder = ((TypedPValue<?>) value).getCoder();
-        if (value instanceof PCollection) {
-          // Wrap the PCollection element Coder inside a WindowedValueCoder.
-          coder = WindowedValue.getFullCoder(
-              coder,
-              ((PCollection<?>) value).getWindowingStrategy().getWindowFn().windowCoder());
-        }
-      } else {
-        // No output coder to encode.
-        coder = null;
-      }
+    public long addOutput(PCollection<?> value) {
+      translator.producers.put(value, translator.currentTransform);
+      // Wrap the PCollection element Coder inside a WindowedValueCoder.
+      Coder<?> coder =
+          WindowedValue.getFullCoder(
+              value.getCoder(), value.getWindowingStrategy().getWindowFn().windowCoder());
       return addOutput(value, coder);
     }
 
     @Override
     public long addCollectionToSingletonOutput(
-        PValue inputValue, PValue outputValue) {
+        PCollection<?> inputValue, PCollectionView<?> outputValue) {
+      translator.producers.put(outputValue, translator.currentTransform);
       Coder<?> inputValueCoder =
           checkNotNull(translator.outputCoders.get(inputValue));
       // The inputValueCoder for the input PCollection should be some
@@ -646,7 +627,12 @@ public class DataflowPipelineTranslator {
 
       Map<String, Object> outputInfo = new HashMap<>();
       addString(outputInfo, PropertyNames.OUTPUT_NAME, Long.toString(id));
-      addString(outputInfo, PropertyNames.USER_NAME, value.getName());
+
+      String stepName = getString(properties, PropertyNames.USER_NAME);
+      String generatedName = String.format(
+          "%s.out%d", stepName, outputInfoList.size());
+
+      addString(outputInfo, PropertyNames.USER_NAME, generatedName);
       if (value instanceof PCollection
           && translator.runner.doesPCollectionRequireIndexedFormat((PCollection<?>) value)) {
         addBoolean(outputInfo, PropertyNames.USE_INDEXED_FORMAT, true);
@@ -654,7 +640,7 @@ public class DataflowPipelineTranslator {
       if (valueCoder != null) {
         // Verify that encoding can be decoded, in order to catch serialization
         // failures as early as possible.
-        CloudObject encoding = SerializableUtils.ensureSerializable(valueCoder);
+        CloudObject encoding = CloudObjects.asCloudObject(valueCoder);
         addObject(outputInfo, PropertyNames.ENCODING, encoding);
         translator.outputCoders.put(value, valueCoder);
       }
@@ -691,20 +677,20 @@ public class DataflowPipelineTranslator {
 
   static {
     registerTransformTranslator(
-        View.CreatePCollectionView.class,
-        new TransformTranslator<View.CreatePCollectionView>() {
+        CreateDataflowView.class,
+        new TransformTranslator<CreateDataflowView>() {
           @Override
-          public void translate(View.CreatePCollectionView transform, TranslationContext context) {
+          public void translate(CreateDataflowView transform, TranslationContext context) {
             translateTyped(transform, context);
           }
 
           private <ElemT, ViewT> void translateTyped(
-              View.CreatePCollectionView<ElemT, ViewT> transform, TranslationContext context) {
+              CreateDataflowView<ElemT, ViewT> transform, TranslationContext context) {
             StepTranslationContext stepContext =
                 context.addStep(transform, "CollectionToSingleton");
             PCollection<ElemT> input = context.getInput(transform);
             stepContext.addInput(PropertyNames.PARALLEL_INPUT, input);
-            stepContext.addCollectionToSingletonOutput(input, context.getOutput(transform));
+            stepContext.addCollectionToSingletonOutput(input, transform.getView());
           }
         });
 
@@ -756,10 +742,10 @@ public class DataflowPipelineTranslator {
             StepTranslationContext stepContext = context.addStep(transform, "Flatten");
 
             List<OutputReference> inputs = new LinkedList<>();
-            for (TaggedPValue input : context.getInputs(transform)) {
+            for (PValue input : context.getInputs(transform).values()) {
               inputs.add(
                   context.asOutputReference(
-                      input.getValue(), context.getProducer(input.getValue())));
+                      input, context.getProducer(input)));
             }
             stepContext.addInput(PropertyNames.INPUTS, inputs);
             stepContext.addOutput(context.getOutput(transform));
@@ -807,13 +793,14 @@ public class DataflowPipelineTranslator {
                 context.getPipelineOptions().as(StreamingOptions.class).isStreaming();
             boolean disallowCombinerLifting =
                 !windowingStrategy.getWindowFn().isNonMerging()
+                    || !windowingStrategy.getWindowFn().assignsToOneWindow()
                     || (isStreaming && !transform.fewKeys())
                     // TODO: Allow combiner lifting on the non-default trigger, as appropriate.
                     || !(windowingStrategy.getTrigger() instanceof DefaultTrigger);
             stepContext.addInput(PropertyNames.DISALLOW_COMBINER_LIFTING, disallowCombinerLifting);
             stepContext.addInput(
                 PropertyNames.SERIALIZED_FN,
-                byteArrayToJsonString(serializeToByteArray(windowingStrategy)));
+                byteArrayToJsonString(serializeWindowingStrategy(windowingStrategy)));
             stepContext.addInput(
                 PropertyNames.IS_MERGING_WINDOW_FN,
                 !windowingStrategy.getWindowFn().isNonMerging());
@@ -821,15 +808,15 @@ public class DataflowPipelineTranslator {
         });
 
     registerTransformTranslator(
-        ParDo.BoundMulti.class,
-        new TransformTranslator<ParDo.BoundMulti>() {
+        ParDo.MultiOutput.class,
+        new TransformTranslator<ParDo.MultiOutput>() {
           @Override
-          public void translate(ParDo.BoundMulti transform, TranslationContext context) {
+          public void translate(ParDo.MultiOutput transform, TranslationContext context) {
             translateMultiHelper(transform, context);
           }
 
           private <InputT, OutputT> void translateMultiHelper(
-              ParDo.BoundMulti<InputT, OutputT> transform, TranslationContext context) {
+              ParDo.MultiOutput<InputT, OutputT> transform, TranslationContext context) {
 
             StepTranslationContext stepContext = context.addStep(transform, "ParallelDo");
             translateInputs(
@@ -849,15 +836,15 @@ public class DataflowPipelineTranslator {
         });
 
     registerTransformTranslator(
-        ParDo.Bound.class,
-        new TransformTranslator<ParDo.Bound>() {
+        ParDoSingle.class,
+        new TransformTranslator<ParDoSingle>() {
           @Override
-          public void translate(ParDo.Bound transform, TranslationContext context) {
+          public void translate(ParDoSingle transform, TranslationContext context) {
             translateSingleHelper(transform, context);
           }
 
           private <InputT, OutputT> void translateSingleHelper(
-              ParDo.Bound<InputT, OutputT> transform, TranslationContext context) {
+              ParDoSingle<InputT, OutputT> transform, TranslationContext context) {
 
             StepTranslationContext stepContext = context.addStep(transform, "ParallelDo");
             translateInputs(
@@ -891,9 +878,8 @@ public class DataflowPipelineTranslator {
             stepContext.addOutput(context.getOutput(transform));
 
             WindowingStrategy<?, ?> strategy = context.getOutput(transform).getWindowingStrategy();
-            byte[] serializedBytes = serializeToByteArray(strategy);
+            byte[] serializedBytes = serializeWindowingStrategy(strategy);
             String serializedJson = byteArrayToJsonString(serializedBytes);
-            assert Arrays.equals(serializedBytes, jsonStringToByteArray(serializedJson));
             stepContext.addInput(PropertyNames.SERIALIZED_FN, serializedJson);
           }
         });
@@ -902,6 +888,45 @@ public class DataflowPipelineTranslator {
     // IO Translation.
 
     registerTransformTranslator(Read.Bounded.class, new ReadTranslator());
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Splittable DoFn translation.
+
+    registerTransformTranslator(
+        SplittableParDo.ProcessKeyedElements.class,
+        new TransformTranslator<SplittableParDo.ProcessKeyedElements>() {
+          @Override
+          public void translate(
+              SplittableParDo.ProcessKeyedElements transform, TranslationContext context) {
+            translateTyped(transform, context);
+          }
+
+          private <InputT, OutputT, RestrictionT> void translateTyped(
+              SplittableParDo.ProcessKeyedElements<InputT, OutputT, RestrictionT> transform,
+              TranslationContext context) {
+            StepTranslationContext stepContext =
+                context.addStep(transform, "SplittableProcessKeyed");
+
+            translateInputs(
+                stepContext, context.getInput(transform), transform.getSideInputs(), context);
+            BiMap<Long, TupleTag<?>> outputMap =
+                translateOutputs(context.getOutputs(transform), stepContext);
+            stepContext.addInput(
+                PropertyNames.SERIALIZED_FN,
+                byteArrayToJsonString(
+                    serializeToByteArray(
+                        DoFnInfo.forFn(
+                            transform.getFn(),
+                            transform.getInputWindowingStrategy(),
+                            transform.getSideInputs(),
+                            transform.getElementCoder(),
+                            outputMap.inverse().get(transform.getMainOutputTag()),
+                            outputMap))));
+            stepContext.addInput(
+                PropertyNames.RESTRICTION_CODER,
+                CloudObjects.asCloudObject(transform.getRestrictionCoder()));
+          }
+        });
   }
 
   private static void translateInputs(
@@ -948,6 +973,11 @@ public class DataflowPipelineTranslator {
               fn));
     }
 
+    if (signature.usesState() || signature.usesTimers()) {
+      DataflowRunner.verifyStateSupported(fn);
+      DataflowRunner.verifyStateSupportForWindowingStrategy(windowingStrategy);
+    }
+
     stepContext.addInput(PropertyNames.USER_FN, fn.getClass().getName());
     stepContext.addInput(
         PropertyNames.SERIALIZED_FN,
@@ -965,11 +995,11 @@ public class DataflowPipelineTranslator {
   }
 
   private static BiMap<Long, TupleTag<?>> translateOutputs(
-      List<TaggedPValue> outputs,
+      Map<TupleTag<?>, PValue> outputs,
       StepTranslationContext stepContext) {
     ImmutableBiMap.Builder<Long, TupleTag<?>> mapBuilder = ImmutableBiMap.builder();
-    for (TaggedPValue taggedOutput : outputs) {
-      TupleTag<?> tag = taggedOutput.getTag();
+    for (Map.Entry<TupleTag<?>, PValue> taggedOutput : outputs.entrySet()) {
+      TupleTag<?> tag = taggedOutput.getKey();
       checkArgument(taggedOutput.getValue() instanceof PCollection,
           "Non %s returned from Multi-output %s",
           PCollection.class.getSimpleName(),

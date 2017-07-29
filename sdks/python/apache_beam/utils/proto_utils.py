@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+"""For internal use only; no backwards-compatibility guarantees."""
+
 from google.protobuf import any_pb2
 from google.protobuf import struct_pb2
 
@@ -26,10 +28,10 @@ def pack_Any(msg):
   """
   if msg is None:
     return None
-  else:
-    result = any_pb2.Any()
-    result.Pack(msg)
-    return result
+
+  result = any_pb2.Any()
+  result.Pack(msg)
+  return result
 
 
 def unpack_Any(any_msg, msg_class):
@@ -39,10 +41,9 @@ def unpack_Any(any_msg, msg_class):
   """
   if msg_class is None:
     return None
-  else:
-    msg = msg_class()
-    any_msg.Unpack(msg)
-    return msg
+  msg = msg_class()
+  any_msg.Unpack(msg)
+  return msg
 
 
 def pack_Struct(**kwargs):
@@ -50,5 +51,11 @@ def pack_Struct(**kwargs):
   """
   msg = struct_pb2.Struct()
   for key, value in kwargs.items():
-    msg[key] = value  # pylint: disable=unsubscriptable-object
+    msg[key] = value  # pylint: disable=unsubscriptable-object, unsupported-assignment-operation
   return msg
+
+
+def from_micros(cls, micros):
+  result = cls()
+  result.FromMicroseconds(micros)
+  return result

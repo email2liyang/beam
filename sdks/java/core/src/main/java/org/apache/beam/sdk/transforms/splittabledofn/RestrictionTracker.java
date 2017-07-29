@@ -31,12 +31,23 @@ public interface RestrictionTracker<RestrictionT> {
   RestrictionT currentRestriction();
 
   /**
-   * Signals that the current {@link DoFn.ProcessElement} call should terminate as soon as possible.
-   * Modifies {@link #currentRestriction}. Returns a restriction representing the rest of the work:
-   * the old value of {@link #currentRestriction} is equivalent to the new value and the return
-   * value of this method combined. Must be called at most once on a given object.
+   * Signals that the current {@link DoFn.ProcessElement} call should terminate as soon as possible:
+   * after this method returns, the tracker MUST refuse all future claim calls, and {@link
+   * #checkDone} MUST succeed.
+   *
+   * <p>Modifies {@link #currentRestriction}. Returns a restriction representing the rest of the
+   * work: the old value of {@link #currentRestriction} is equivalent to the new value and the
+   * return value of this method combined. Must be called at most once on a given object.
    */
   RestrictionT checkpoint();
+
+  /**
+   * Called by the runner after {@link DoFn.ProcessElement} returns.
+   *
+   * <p>Must throw an exception with an informative error message, if there is still any unclaimed
+   * work remaining in the restriction.
+   */
+  void checkDone() throws IllegalStateException;
 
   // TODO: Add the more general splitRemainderAfterFraction() and other methods.
 }

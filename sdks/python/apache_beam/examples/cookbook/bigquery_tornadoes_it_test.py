@@ -26,11 +26,14 @@ from nose.plugins.attrib import attr
 
 from apache_beam.examples.cookbook import bigquery_tornadoes
 from apache_beam.io.gcp.tests.bigquery_matcher import BigqueryMatcher
-from apache_beam.test_pipeline import TestPipeline
-from apache_beam.tests.pipeline_verifiers import PipelineStateMatcher
+from apache_beam.testing.pipeline_verifiers import PipelineStateMatcher
+from apache_beam.testing.test_pipeline import TestPipeline
 
 
 class BigqueryTornadoesIT(unittest.TestCase):
+
+  # Enable nose tests running in parallel
+  _multiprocess_can_split_ = True
 
   # The default checksum is a SHA-1 hash generated from sorted rows reading
   # from expected Bigquery table.
@@ -56,6 +59,7 @@ class BigqueryTornadoesIT(unittest.TestCase):
     # and start pipeline job by calling pipeline main function.
     bigquery_tornadoes.run(
         test_pipeline.get_full_options_as_args(**extra_opts))
+
 
 if __name__ == '__main__':
   logging.getLogger().setLevel(logging.INFO)

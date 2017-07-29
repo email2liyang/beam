@@ -16,11 +16,14 @@
 #
 
 """Dataflow native sources and sinks.
+
+For internal use only; no backwards-compatibility guarantees.
 """
 
 import logging
 
 from apache_beam import pvalue
+from apache_beam.io import iobase
 from apache_beam.transforms import ptransform
 from apache_beam.transforms.display import HasDisplayData
 
@@ -33,13 +36,14 @@ def _dict_printable_fields(dict_object, skip_fields):
           if (value or value == 0)
           and name not in skip_fields]
 
+
 _minor_fields = ['coder', 'key_coder', 'value_coder',
                  'config_bytes', 'elements',
                  'append_trailing_newlines', 'strip_trailing_newlines',
                  'compression_type']
 
 
-class NativeSource(HasDisplayData):
+class NativeSource(iobase.SourceBase):
   """A source implemented by Dataflow service.
 
   This class is to be only inherited by sources natively implemented by Cloud
@@ -51,6 +55,9 @@ class NativeSource(HasDisplayData):
   def reader(self):
     """Returns a NativeSourceReader instance associated with this source."""
     raise NotImplementedError
+
+  def is_bounded(self):
+    return True
 
   def __repr__(self):
     return '<{name} {vals}>'.format(

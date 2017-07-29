@@ -469,7 +469,7 @@ public class AutoComplete {
     // Create the pipeline.
     Pipeline p = Pipeline.create(options);
     PCollection<KV<String, List<CompletionCandidate>>> toWrite = p
-      .apply(TextIO.Read.from(options.getInputFile()))
+      .apply(TextIO.read().from(options.getInputFile()))
       .apply(ParDo.of(new ExtractHashtags()))
       .apply(Window.<String>into(windowFn))
       .apply(ComputeTopCompletions.top(10, options.getRecursive()));
@@ -491,7 +491,7 @@ public class AutoComplete {
 
       toWrite
         .apply(ParDo.of(new FormatForBigquery()))
-        .apply(BigQueryIO.Write
+        .apply(BigQueryIO.writeTableRows()
                .to(tableRef)
                .withSchema(FormatForBigquery.getSchema())
                .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)

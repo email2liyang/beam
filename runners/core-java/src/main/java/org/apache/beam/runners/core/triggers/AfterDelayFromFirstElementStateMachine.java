@@ -27,15 +27,14 @@ import org.apache.beam.runners.core.StateAccessor;
 import org.apache.beam.runners.core.StateMerging;
 import org.apache.beam.runners.core.StateTag;
 import org.apache.beam.runners.core.StateTags;
-import org.apache.beam.runners.core.triggers.TriggerStateMachine.OnceTriggerStateMachine;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.InstantCoder;
-import org.apache.beam.sdk.transforms.Combine;
+import org.apache.beam.sdk.state.CombiningState;
+import org.apache.beam.sdk.state.GroupingState;
+import org.apache.beam.sdk.state.TimeDomain;
+import org.apache.beam.sdk.transforms.Combine.Holder;
 import org.apache.beam.sdk.transforms.Min;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.sdk.util.TimeDomain;
-import org.apache.beam.sdk.util.state.AccumulatorCombiningState;
-import org.apache.beam.sdk.util.state.CombiningState;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.joda.time.format.PeriodFormat;
@@ -50,13 +49,13 @@ import org.joda.time.format.PeriodFormatter;
 // This class should be inlined to subclasses and deleted, simplifying them too
 // https://issues.apache.org/jira/browse/BEAM-1486
 @Experimental(Experimental.Kind.TRIGGER)
-public abstract class AfterDelayFromFirstElementStateMachine extends OnceTriggerStateMachine {
+public abstract class AfterDelayFromFirstElementStateMachine extends TriggerStateMachine {
 
   protected static final List<SerializableFunction<Instant, Instant>> IDENTITY =
       ImmutableList.<SerializableFunction<Instant, Instant>>of();
 
-  protected static final StateTag<Object, AccumulatorCombiningState<Instant,
-                                              Combine.Holder<Instant>, Instant>> DELAYED_UNTIL_TAG =
+  protected static final StateTag<CombiningState<Instant,
+                                                Holder<Instant>, Instant>> DELAYED_UNTIL_TAG =
       StateTags.makeSystemTagInternal(StateTags.combiningValueFromInputInternal(
           "delayed", InstantCoder.of(), Min.<Instant>naturalOrder()));
 
@@ -169,7 +168,7 @@ public abstract class AfterDelayFromFirstElementStateMachine extends OnceTrigger
 
   @Override
   public void onElement(OnElementContext c) throws Exception {
-    CombiningState<Instant, Instant> delayUntilState = c.state().access(DELAYED_UNTIL_TAG);
+    GroupingState<Instant, Instant> delayUntilState = c.state().access(DELAYED_UNTIL_TAG);
     Instant oldDelayUntil = delayUntilState.read();
 
     // Since processing time can only advance, resulting in target wake-up times we would
@@ -237,8 +236,9 @@ public abstract class AfterDelayFromFirstElementStateMachine extends OnceTrigger
   }
 
   @Override
-  protected void onOnlyFiring(TriggerStateMachine.TriggerContext context) throws Exception {
+  public final void onFire(TriggerContext context) throws Exception {
     clear(context);
+    context.trigger().setFinished(true);
   }
 
   protected Instant computeTargetTimestamp(Instant time) {

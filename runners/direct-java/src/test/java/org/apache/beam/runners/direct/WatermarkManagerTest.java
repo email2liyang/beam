@@ -24,6 +24,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.Assert.assertThat;
 
+import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
@@ -36,8 +37,6 @@ import javax.annotation.Nullable;
 import org.apache.beam.runners.core.StateNamespaces;
 import org.apache.beam.runners.core.TimerInternals.TimerData;
 import org.apache.beam.runners.direct.CommittedResult.OutputType;
-import org.apache.beam.runners.direct.DirectRunner.CommittedBundle;
-import org.apache.beam.runners.direct.DirectRunner.UncommittedBundle;
 import org.apache.beam.runners.direct.WatermarkManager.FiredTimers;
 import org.apache.beam.runners.direct.WatermarkManager.TimerUpdate;
 import org.apache.beam.runners.direct.WatermarkManager.TimerUpdate.TimerUpdateBuilder;
@@ -45,8 +44,9 @@ import org.apache.beam.runners.direct.WatermarkManager.TransformWatermarks;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarLongCoder;
+import org.apache.beam.sdk.runners.AppliedPTransform;
+import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.apache.beam.sdk.transforms.AppliedPTransform;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Filter;
@@ -57,7 +57,6 @@ import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.TimeDomain;
 import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -123,6 +122,7 @@ public class WatermarkManagerTest implements Serializable {
     flattened = preFlatten.apply("flattened", Flatten.<Integer>pCollections());
 
     clock = MockClock.fromInstant(new Instant(1000));
+    DirectGraphs.performDirectOverrides(p);
     graph = DirectGraphs.getGraph(p);
 
     manager = WatermarkManager.create(clock, graph);
@@ -319,7 +319,7 @@ public class WatermarkManagerTest implements Serializable {
         TimerUpdate.empty(),
         CommittedResult.create(
             StepTransformResult.withoutHold(graph.getProducer(created)).build(),
-            root.withElements(Collections.<WindowedValue<Void>>emptyList()),
+            Optional.<CommittedBundle<?>>absent(),
             Collections.singleton(createBundle),
             EnumSet.allOf(OutputType.class)),
         BoundedWindow.TIMESTAMP_MAX_VALUE);
@@ -333,7 +333,7 @@ public class WatermarkManagerTest implements Serializable {
         TimerUpdate.empty(),
         CommittedResult.create(
             StepTransformResult.withoutHold(theFlatten).build(),
-            createBundle.withElements(Collections.<WindowedValue<Integer>>emptyList()),
+            Optional.<CommittedBundle<?>>absent(),
             Collections.<CommittedBundle<?>>emptyList(),
             EnumSet.allOf(OutputType.class)),
         BoundedWindow.TIMESTAMP_MAX_VALUE);
@@ -346,7 +346,7 @@ public class WatermarkManagerTest implements Serializable {
         TimerUpdate.empty(),
         CommittedResult.create(
             StepTransformResult.withoutHold(theFlatten).build(),
-            createBundle.withElements(Collections.<WindowedValue<Integer>>emptyList()),
+            Optional.<CommittedBundle<?>>absent(),
             Collections.<CommittedBundle<?>>emptyList(),
             EnumSet.allOf(OutputType.class)),
         BoundedWindow.TIMESTAMP_MAX_VALUE);
@@ -1502,9 +1502,15 @@ public class WatermarkManagerTest implements Serializable {
       AppliedPTransform<?, ?, ?> transform,
       @Nullable CommittedBundle<?> unprocessedBundle,
       Iterable<? extends CommittedBundle<?>> bundles) {
+    Optional<? extends CommittedBundle<?>> unprocessedElements;
+    if (unprocessedBundle == null || Iterables.isEmpty(unprocessedBundle.getElements())) {
+      unprocessedElements = Optional.absent();
+    } else {
+      unprocessedElements = Optional.of(unprocessedBundle);
+    }
     return CommittedResult.create(
         StepTransformResult.withoutHold(transform).build(),
-        unprocessedBundle,
+        unprocessedElements,
         bundles,
         Iterables.isEmpty(bundles)
             ? EnumSet.noneOf(OutputType.class)

@@ -21,10 +21,11 @@
 from __future__ import absolute_import
 import logging
 
-from apache_beam import coders
+from apache_beam.coders import coders
 from apache_beam.io import filebasedsource
-from apache_beam.io import fileio
+from apache_beam.io import filebasedsink
 from apache_beam.io import iobase
+from apache_beam.io.filesystem import CompressionTypes
 from apache_beam.io.iobase import Read
 from apache_beam.io.iobase import Write
 from apache_beam.transforms import PTransform
@@ -159,7 +160,7 @@ class _TextSource(filebasedsource.FileBasedSource):
         # followed by a new line character. Since such a record is at the last
         # position of a file, it should not be a part of the considered range.
         # We do this check to ignore such records.
-        if len(record) == 0 and num_bytes_to_next_record < 0:
+        if len(record) == 0 and num_bytes_to_next_record < 0:  # pylint: disable=len-as-condition
           break
 
         # Record separator must be larger than zero bytes.
@@ -261,7 +262,7 @@ class _TextSource(filebasedsource.FileBasedSource):
               sep_bounds[1] - record_start_position_in_buffer)
 
 
-class _TextSink(fileio.FileSink):
+class _TextSink(filebasedsink.FileBasedSink):
   """A sink to a GCS or local text file or files."""
 
   def __init__(self,
@@ -271,7 +272,7 @@ class _TextSink(fileio.FileSink):
                num_shards=0,
                shard_name_template=None,
                coder=coders.ToStringCoder(),
-               compression_type=fileio.CompressionTypes.AUTO,
+               compression_type=CompressionTypes.AUTO,
                header=None):
     """Initialize a _TextSink.
 
@@ -290,13 +291,12 @@ class _TextSink(fileio.FileSink):
         the performance of a pipeline.  Setting this value is not recommended
         unless you require a specific number of output files.
       shard_name_template: A template string containing placeholders for
-        the shard number and shard count. Currently only '' and
-        '-SSSSS-of-NNNNN' are patterns accepted by the service.
-        When constructing a filename for a particular shard number, the
-        upper-case letters 'S' and 'N' are replaced with the 0-padded shard
-        number and shard count respectively.  This argument can be '' in which
-        case it behaves as if num_shards was set to 1 and only one file will be
-        generated. The default pattern used is '-SSSSS-of-NNNNN'.
+        the shard number and shard count. When constructing a filename for a
+        particular shard number, the upper-case letters 'S' and 'N' are
+        replaced with the 0-padded shard number and shard count respectively.
+        This argument can be '' in which case it behaves as if num_shards was
+        set to 1 and only one file will be generated. The default pattern used
+        is '-SSSSS-of-NNNNN' if None is passed as the shard_name_template.
       coder: Coder used to encode each line.
       compression_type: Used to handle compressed output files. Typical value
         is CompressionTypes.AUTO, in which case the final file path's
@@ -355,7 +355,7 @@ class ReadFromText(PTransform):
       self,
       file_pattern=None,
       min_bundle_size=0,
-      compression_type=fileio.CompressionTypes.AUTO,
+      compression_type=CompressionTypes.AUTO,
       strip_trailing_newlines=True,
       coder=coders.StrUtf8Coder(),
       validate=True,
@@ -384,7 +384,6 @@ class ReadFromText(PTransform):
     """
 
     super(ReadFromText, self).__init__(**kwargs)
-    self._strip_trailing_newlines = strip_trailing_newlines
     self._source = _TextSource(
         file_pattern, min_bundle_size, compression_type,
         strip_trailing_newlines, coder, validate=validate,
@@ -404,7 +403,7 @@ class WriteToText(PTransform):
                num_shards=0,
                shard_name_template=None,
                coder=coders.ToStringCoder(),
-               compression_type=fileio.CompressionTypes.AUTO,
+               compression_type=CompressionTypes.AUTO,
                header=None):
     """Initialize a WriteToText PTransform.
 

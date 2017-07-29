@@ -24,6 +24,9 @@ import threading
 
 from apache_beam.io import iobase
 
+__all__ = ['OffsetRangeTracker', 'LexicographicKeyRangeTracker',
+           'OrderedPositionRangeTracker', 'UnsplittableRangeTracker']
+
 
 class OffsetRangeTracker(iobase.RangeTracker):
   """A 'RangeTracker' for non-negative positions of type 'long'."""
@@ -42,9 +45,9 @@ class OffsetRangeTracker(iobase.RangeTracker):
       raise ValueError('Start offset must not be \'None\'')
     if end is None:
       raise ValueError('End offset must not be \'None\'')
-    assert isinstance(start, int) or isinstance(start, long)
+    assert isinstance(start, (int, long))
     if end != self.OFFSET_INFINITY:
-      assert isinstance(end, int) or isinstance(end, long)
+      assert isinstance(end, (int, long))
 
     assert start <= end
 
@@ -91,8 +94,8 @@ class OffsetRangeTracker(iobase.RangeTracker):
           'The first record [starting at %d] must be at a split point' %
           record_start)
 
-    if (split_point and self._offset_of_last_split_point is not -1 and
-        record_start is self._offset_of_last_split_point):
+    if (split_point and self._offset_of_last_split_point != -1 and
+        record_start == self._offset_of_last_split_point):
       raise ValueError(
           'Record at a split point has same offset as the previous split '
           'point: %d' % record_start)
@@ -188,134 +191,6 @@ class OffsetRangeTracker(iobase.RangeTracker):
 
   def set_split_points_unclaimed_callback(self, callback):
     self._split_points_unclaimed_callback = callback
-
-
-class GroupedShuffleRangeTracker(iobase.RangeTracker):
-  """A 'RangeTracker' for positions used by'GroupedShuffleReader'.
-
-  These positions roughly correspond to hashes of keys. In case of hash
-  collisions, multiple groups can have the same position. In that case, the
-  first group at a particular position is considered a split point (because
-  it is the first to be returned when reading a position range starting at this
-  position), others are not.
-  """
-
-  def __init__(self, decoded_start_pos, decoded_stop_pos):
-    super(GroupedShuffleRangeTracker, self).__init__()
-    self._decoded_start_pos = decoded_start_pos
-    self._decoded_stop_pos = decoded_stop_pos
-    self._decoded_last_group_start = None
-    self._last_group_was_at_a_split_point = False
-    self._split_points_seen = 0
-    self._lock = threading.Lock()
-
-  def start_position(self):
-    return self._decoded_start_pos
-
-  def stop_position(self):
-    return self._decoded_stop_pos
-
-  def last_group_start(self):
-    return self._decoded_last_group_start
-
-  def _validate_decoded_group_start(self, decoded_group_start, split_point):
-    if self.start_position() and decoded_group_start < self.start_position():
-      raise ValueError('Trying to return record at %r which is before the'
-                       ' starting position at %r' %
-                       (decoded_group_start, self.start_position()))
-
-    if (self.last_group_start() and
-        decoded_group_start < self.last_group_start()):
-      raise ValueError('Trying to return group at %r which is before the'
-                       ' last-returned group at %r' %
-                       (decoded_group_start, self.last_group_start()))
-    if (split_point and self.last_group_start() and
-        self.last_group_start() == decoded_group_start):
-      raise ValueError('Trying to return a group at a split point with '
-                       'same position as the previous group: both at %r, '
-                       'last group was %sat a split point.' %
-                       (decoded_group_start,
-                        ('' if self._last_group_was_at_a_split_point
-                         else 'not ')))
-    if not split_point:
-      if self.last_group_start() is None:
-        raise ValueError('The first group [at %r] must be at a split point' %
-                         decoded_group_start)
-      if self.last_group_start() != decoded_group_start:
-        # This case is not a violation of general RangeTracker semantics, but it
-        # is contrary to how GroupingShuffleReader in particular works. Hitting
-        # it would mean it's behaving unexpectedly.
-        raise ValueError('Trying to return a group not at a split point, but '
-                         'with a different position than the previous group: '
-                         'last group was %r at %r, current at a %s split'
-                         ' point.' %
-                         (self.last_group_start()
-                          , decoded_group_start
-                          , ('' if self._last_group_was_at_a_split_point
-                             else 'non-')))
-
-  def try_claim(self, decoded_group_start):
-    with self._lock:
-      self._validate_decoded_group_start(decoded_group_start, True)
-      if (self.stop_position()
-          and decoded_group_start >= self.stop_position()):
-        return False
-
-      self._decoded_last_group_start = decoded_group_start
-      self._last_group_was_at_a_split_point = True
-      self._split_points_seen += 1
-      return True
-
-  def set_current_position(self, decoded_group_start):
-    with self._lock:
-      self._validate_decoded_group_start(decoded_group_start, False)
-      self._decoded_last_group_start = decoded_group_start
-      self._last_group_was_at_a_split_point = False
-
-  def try_split(self, decoded_split_position):
-    with self._lock:
-      if self.last_group_start() is None:
-        logging.info('Refusing to split %r at %r: unstarted'
-                     , self, decoded_split_position)
-        return
-
-      if decoded_split_position <= self.last_group_start():
-        logging.info('Refusing to split %r at %r: already past proposed split '
-                     'position'
-                     , self, decoded_split_position)
-        return
-
-      if ((self.stop_position()
-           and decoded_split_position >= self.stop_position())
-          or (self.start_position()
-              and decoded_split_position <= self.start_position())):
-        logging.error('Refusing to split %r at %r: proposed split position out '
-                      'of range', self, decoded_split_position)
-        return
-
-      logging.debug('Agreeing to split %r at %r'
-                    , self, decoded_split_position)
-      self._decoded_stop_pos = decoded_split_position
-
-      # Since GroupedShuffleRangeTracker cannot determine relative sizes of the
-      # two splits, returning 0.5 as the fraction below so that the framework
-      # assumes the splits to be of the same size.
-      return self._decoded_stop_pos, 0.5
-
-  def fraction_consumed(self):
-    # GroupingShuffle sources have special support on the service and the
-    # service will estimate progress from positions for us.
-    raise RuntimeError('GroupedShuffleRangeTracker does not measure fraction'
-                       ' consumed due to positions being opaque strings'
-                       ' that are interpreted by the service')
-
-  def split_points(self):
-    with self._lock:
-      splits_points_consumed = (
-          0 if self._split_points_seen <= 1 else (self._split_points_seen - 1))
-
-      return (splits_points_consumed,
-              iobase.RangeTracker.SPLIT_POINTS_UNKNOWN)
 
 
 class OrderedPositionRangeTracker(iobase.RangeTracker):

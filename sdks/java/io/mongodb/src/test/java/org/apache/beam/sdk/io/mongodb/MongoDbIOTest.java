@@ -18,12 +18,12 @@
 package org.apache.beam.sdk.io.mongodb;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 
 import com.mongodb.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
-
 import de.flapdoodle.embed.mongo.MongodExecutable;
 import de.flapdoodle.embed.mongo.MongodProcess;
 import de.flapdoodle.embed.mongo.MongodStarter;
@@ -35,13 +35,12 @@ import de.flapdoodle.embed.mongo.config.Storage;
 import de.flapdoodle.embed.mongo.distribution.Version;
 import de.flapdoodle.embed.process.io.file.Files;
 import de.flapdoodle.embed.process.runtime.Network;
-
 import java.io.File;
 import java.io.Serializable;
 import java.net.ServerSocket;
 import java.util.ArrayList;
+import java.util.List;
 
-import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
@@ -51,7 +50,6 @@ import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-
 import org.bson.Document;
 import org.junit.After;
 import org.junit.Assert;
@@ -59,7 +57,6 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -145,7 +142,22 @@ public class MongoDbIOTest implements Serializable {
   }
 
   @Test
-  @Category(NeedsRunner.class)
+  public void testSplitIntoFilters() throws Exception {
+    ArrayList<Document> documents = new ArrayList<>();
+    documents.add(new Document("_id", 56));
+    documents.add(new Document("_id", 109));
+    documents.add(new Document("_id", 256));
+    List<String> filters = MongoDbIO.BoundedMongoDbSource.splitKeysToFilters(documents, null);
+    assertEquals(4, filters.size());
+    assertEquals("{ $and: [ {\"_id\":{$lte:ObjectId(\"56\")}} ]}", filters.get(0));
+    assertEquals("{ $and: [ {\"_id\":{$gt:ObjectId(\"56\"),$lte:ObjectId(\"109\")}} ]}",
+        filters.get(1));
+    assertEquals("{ $and: [ {\"_id\":{$gt:ObjectId(\"109\"),$lte:ObjectId(\"256\")}} ]}",
+        filters.get(2));
+    assertEquals("{ $and: [ {\"_id\":{$gt:ObjectId(\"256\")}} ]}", filters.get(3));
+  }
+
+  @Test
   public void testFullRead() throws Exception {
 
     PCollection<Document> output = pipeline.apply(
@@ -178,7 +190,42 @@ public class MongoDbIOTest implements Serializable {
   }
 
   @Test
-  @Category(NeedsRunner.class)
+  public void testReadWithCustomConnectionOptions() throws Exception {
+    MongoDbIO.Read read = MongoDbIO.read()
+        .withUri("mongodb://localhost:" + port)
+        .withKeepAlive(false)
+        .withMaxConnectionIdleTime(10)
+        .withDatabase(DATABASE)
+        .withCollection(COLLECTION);
+    assertFalse(read.keepAlive());
+    assertEquals(10, read.maxConnectionIdleTime());
+
+    PCollection<Document> documents = pipeline.apply(read);
+
+    PAssert.thatSingleton(documents.apply("Count All", Count.<Document>globally()))
+        .isEqualTo(1000L);
+
+    PAssert.that(documents
+        .apply("Map Scientist", MapElements.via(new SimpleFunction<Document, KV<String, Void>>() {
+          public KV<String, Void> apply(Document input) {
+            return KV.of(input.getString("scientist"), null);
+          }
+        }))
+        .apply("Count Scientist", Count.<String, Void>perKey())
+    ).satisfies(new SerializableFunction<Iterable<KV<String, Long>>, Void>() {
+      @Override
+      public Void apply(Iterable<KV<String, Long>> input) {
+        for (KV<String, Long> element : input) {
+          assertEquals(100L, element.getValue().longValue());
+        }
+        return null;
+      }
+    });
+
+    pipeline.run();
+  }
+
+  @Test
   public void testReadWithFilter() throws Exception {
 
     PCollection<Document> output = pipeline.apply(
@@ -195,7 +242,6 @@ public class MongoDbIOTest implements Serializable {
   }
 
   @Test
-  @Category(NeedsRunner.class)
   public void testWrite() throws Exception {
 
     ArrayList<Document> data = new ArrayList<>();

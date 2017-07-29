@@ -162,17 +162,18 @@ public class TopWikipediaSessions {
     public PCollection<String> expand(PCollection<TableRow> input) {
       return input
           .apply(ParDo.of(new ExtractUserAndTimestamp()))
-
-          .apply("SampleUsers", ParDo.of(
-              new DoFn<String, String>() {
-                @ProcessElement
-                public void processElement(ProcessContext c) {
-                  if (Math.abs(c.element().hashCode()) <= Integer.MAX_VALUE * samplingThreshold) {
-                    c.output(c.element());
-                  }
-                }
-              }))
-
+          .apply(
+              "SampleUsers",
+              ParDo.of(
+                  new DoFn<String, String>() {
+                    @ProcessElement
+                    public void processElement(ProcessContext c) {
+                      if (Math.abs((long) c.element().hashCode())
+                          <= Integer.MAX_VALUE * samplingThreshold) {
+                        c.output(c.element());
+                      }
+                    }
+                  }))
           .apply(new ComputeSessions())
           .apply("SessionsToStrings", ParDo.of(new SessionsToStringsDoFn()))
           .apply(new TopPerMonth())
@@ -191,7 +192,6 @@ public class TopWikipediaSessions {
     @Default.String(EXPORTED_WIKI_TABLE)
     String getInput();
     void setInput(String value);
-
     @Description("File to output results to")
     @Validation.Required
     String getOutput();
@@ -207,10 +207,10 @@ public class TopWikipediaSessions {
 
     double samplingThreshold = 0.1;
 
-    p.apply(TextIO.Read.from(options.getInput()))
+    p.apply(TextIO.read().from(options.getInput()))
         .apply(MapElements.via(new ParseTableRowJson()))
         .apply(new ComputeTopSessions(samplingThreshold))
-        .apply("Write", TextIO.Write.withoutSharding().to(options.getOutput()));
+        .apply("Write", TextIO.write().withoutSharding().to(options.getOutput()));
 
     p.run().waitUntilFinish();
   }

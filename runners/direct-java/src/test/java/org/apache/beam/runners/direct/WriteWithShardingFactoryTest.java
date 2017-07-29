@@ -30,29 +30,41 @@ import static org.junit.Assert.assertThat;
 import java.io.File;
 import java.io.FileReader;
 import java.io.Reader;
+import java.io.Serializable;
 import java.nio.CharBuffer;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import javax.annotation.Nullable;
 import org.apache.beam.runners.direct.WriteWithShardingFactory.CalculateShardsFn;
 import org.apache.beam.sdk.coders.VarLongCoder;
-import org.apache.beam.sdk.io.Sink;
+import org.apache.beam.sdk.coders.VoidCoder;
+import org.apache.beam.sdk.io.DynamicFileDestinations;
+import org.apache.beam.sdk.io.FileBasedSink;
+import org.apache.beam.sdk.io.FileSystems;
+import org.apache.beam.sdk.io.LocalResources;
 import org.apache.beam.sdk.io.TextIO;
-import org.apache.beam.sdk.io.Write;
-import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.io.WriteFiles;
+import org.apache.beam.sdk.io.fs.MatchResult.Metadata;
+import org.apache.beam.sdk.io.fs.ResourceId;
+import org.apache.beam.sdk.options.ValueProvider.StaticValueProvider;
+import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.DoFnTester;
+import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
-import org.apache.beam.sdk.util.IOChannelUtils;
-import org.apache.beam.sdk.util.PCollectionViews;
-import org.apache.beam.sdk.util.WindowingStrategy;
+import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
-import org.hamcrest.Matchers;
+import org.apache.beam.sdk.values.PCollectionViews;
+import org.apache.beam.sdk.values.PDone;
+import org.apache.beam.sdk.values.PValue;
+import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowingStrategy;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -63,11 +75,17 @@ import org.junit.runners.JUnit4;
  * Tests for {@link WriteWithShardingFactory}.
  */
 @RunWith(JUnit4.class)
-public class WriteWithShardingFactoryTest {
-  public static final int INPUT_SIZE = 10000;
-  @Rule public TemporaryFolder tmp = new TemporaryFolder();
-  private WriteWithShardingFactory<Object> factory = new WriteWithShardingFactory<>();
-  @Rule public final TestPipeline p = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+public class WriteWithShardingFactoryTest implements Serializable {
+
+  private static final int INPUT_SIZE = 10000;
+
+  @Rule public transient TemporaryFolder tmp = new TemporaryFolder();
+
+  private transient WriteWithShardingFactory<Object> factory = new WriteWithShardingFactory<>();
+
+  @Rule
+  public final transient TestPipeline p =
+      TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
   @Test
   public void dynamicallyReshardedWrite() throws Exception {
@@ -78,19 +96,22 @@ public class WriteWithShardingFactoryTest {
     Collections.shuffle(strs);
 
     String fileName = "resharded_write";
-    String outputPath = tmp.getRoot().getAbsolutePath();
-    String targetLocation = IOChannelUtils.resolve(outputPath, fileName);
-    // TextIO is implemented in terms of the Write PTransform. When sharding is not specified,
-    // resharding should be automatically applied
-    p.apply(Create.of(strs)).apply(TextIO.Write.to(targetLocation));
+    String targetLocation = tmp.getRoot().toPath().resolve(fileName).toString();
+    String targetLocationGlob = targetLocation + '*';
 
+    // TextIO is implemented in terms of the WriteFiles PTransform. When sharding is not specified,
+    // resharding should be automatically applied
+    p.apply(Create.of(strs)).apply(TextIO.write().to(targetLocation));
     p.run();
 
-    Collection<String> files = IOChannelUtils.getFactory(outputPath).match(targetLocation + "*");
+    List<Metadata> matches = FileSystems.match(targetLocationGlob).metadata();
     List<String> actuals = new ArrayList<>(strs.size());
-    for (String file : files) {
-      CharBuffer buf = CharBuffer.allocate((int) new File(file).length());
-      try (Reader reader = new FileReader(file)) {
+    List<String> files = new ArrayList<>(strs.size());
+    for (Metadata match : matches) {
+      String filename = match.resourceId().toString();
+      files.add(filename);
+      CharBuffer buf = CharBuffer.allocate((int) new File(filename).length());
+      try (Reader reader = new FileReader(filename)) {
         reader.read(buf);
         buf.flip();
       }
@@ -117,8 +138,29 @@ public class WriteWithShardingFactoryTest {
 
   @Test
   public void withNoShardingSpecifiedReturnsNewTransform() {
-    Write<Object> original = Write.to(new TestSink());
-    assertThat(factory.getReplacementTransform(original), not(equalTo((Object) original)));
+    ResourceId outputDirectory = LocalResources.fromString("/foo", true /* isDirectory */);
+
+    PTransform<PCollection<Object>, PDone> original =
+        WriteFiles.to(
+            new FileBasedSink<Object, Void, Object>(
+                StaticValueProvider.of(outputDirectory),
+                DynamicFileDestinations.constant(new FakeFilenamePolicy())) {
+              @Override
+              public WriteOperation<Void, Object> createWriteOperation() {
+                throw new IllegalArgumentException("Should not be used");
+              }
+            });
+    @SuppressWarnings("unchecked")
+    PCollection<Object> objs = (PCollection) p.apply(Create.empty(VoidCoder.of()));
+
+    AppliedPTransform<PCollection<Object>, PDone, PTransform<PCollection<Object>, PDone>>
+        originalApplication =
+            AppliedPTransform.of(
+                "write", objs.expand(), Collections.<TupleTag<?>, PValue>emptyMap(), original, p);
+
+    assertThat(
+        factory.getReplacementTransform(originalApplication).getTransform(),
+        not(equalTo((Object) original)));
   }
 
   @Test
@@ -170,13 +212,14 @@ public class WriteWithShardingFactoryTest {
 
   @Test
   public void keyBasedOnCountFnFewElementsExtraShards() throws Exception {
+    long countValue = (long) WriteWithShardingFactory.MIN_SHARDS_FOR_LOG + 3;
+    PCollection<Long> inputCount = p.apply(Create.of(countValue));
     PCollectionView<Long> elementCountView =
         PCollectionViews.singletonView(
-            p, WindowingStrategy.globalDefault(), true, 0L, VarLongCoder.of());
+            inputCount, WindowingStrategy.globalDefault(), true, 0L, VarLongCoder.of());
     CalculateShardsFn fn = new CalculateShardsFn(3);
     DoFnTester<Long, Integer> fnTester = DoFnTester.of(fn);
 
-    long countValue = (long) WriteWithShardingFactory.MIN_SHARDS_FOR_LOG + 3;
     fnTester.setSideInput(elementCountView, GlobalWindow.INSTANCE, countValue);
 
     List<Integer> kvs = fnTester.processBundle(10L);
@@ -194,19 +237,23 @@ public class WriteWithShardingFactoryTest {
     assertThat(shards, containsInAnyOrder(13));
   }
 
-  @Test
-  public void getInputSucceeds() {
-    PCollection<String> original = p.apply(Create.of("foo"));
-    PCollection<?> input = factory.getInput(original.expand(), p);
-    assertThat(input, Matchers.<PCollection<?>>equalTo(original));
-  }
-
-  private static class TestSink extends Sink<Object> {
+  private static class FakeFilenamePolicy extends FileBasedSink.FilenamePolicy {
     @Override
-    public void validate(PipelineOptions options) {}
+    public ResourceId windowedFilename(
+        int shardNumber,
+        int numShards,
+        BoundedWindow window,
+        PaneInfo paneInfo,
+        FileBasedSink.OutputFileHints outputFileHints) {
+      throw new IllegalArgumentException("Should not be used");
+    }
 
+    @Nullable
     @Override
-    public WriteOperation<Object, ?> createWriteOperation(PipelineOptions options) {
+    public ResourceId unwindowedFilename(
+        int shardNumber,
+        int numShards,
+        FileBasedSink.OutputFileHints outputFileHints) {
       throw new IllegalArgumentException("Should not be used");
     }
   }

@@ -73,8 +73,8 @@ import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import javax.annotation.Nonnull;
+import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.options.Validation.Required;
-import org.apache.beam.sdk.runners.PipelineRunner;
 import org.apache.beam.sdk.runners.PipelineRunnerRegistrar;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.util.StringUtils;
@@ -184,18 +184,20 @@ public class PipelineOptionsFactory {
     private final String[] args;
     private final boolean validation;
     private final boolean strictParsing;
+    private final boolean isCli;
 
     // Do not allow direct instantiation
     private Builder() {
-      this(null, false, true);
+      this(null, false, true, false);
     }
 
     private Builder(String[] args, boolean validation,
-        boolean strictParsing) {
+        boolean strictParsing, boolean isCli) {
       this.defaultAppName = findCallersClassName();
       this.args = args;
       this.validation = validation;
       this.strictParsing = strictParsing;
+      this.isCli = isCli;
     }
 
     /**
@@ -237,7 +239,7 @@ public class PipelineOptionsFactory {
      */
     public Builder fromArgs(String... args) {
       checkNotNull(args, "Arguments should not be null.");
-      return new Builder(args, validation, strictParsing);
+      return new Builder(args, validation, strictParsing, true);
     }
 
     /**
@@ -247,7 +249,7 @@ public class PipelineOptionsFactory {
      * validation.
      */
     public Builder withValidation() {
-      return new Builder(args, true, strictParsing);
+      return new Builder(args, true, strictParsing, isCli);
     }
 
     /**
@@ -255,7 +257,7 @@ public class PipelineOptionsFactory {
      * arguments.
      */
     public Builder withoutStrictParsing() {
-      return new Builder(args, validation, false);
+      return new Builder(args, validation, false, isCli);
     }
 
     /**
@@ -300,7 +302,11 @@ public class PipelineOptionsFactory {
       }
 
       if (validation) {
-        PipelineOptionsValidator.validate(klass, t);
+        if (isCli) {
+          PipelineOptionsValidator.validateCli(klass, t);
+        } else {
+          PipelineOptionsValidator.validate(klass, t);
+        }
       }
       return t;
     }
@@ -444,7 +450,8 @@ public class PipelineOptionsFactory {
   private static final Logger LOG = LoggerFactory.getLogger(PipelineOptionsFactory.class);
   @SuppressWarnings("rawtypes")
   private static final Class<?>[] EMPTY_CLASS_ARRAY = new Class[0];
-  private static final ObjectMapper MAPPER = new ObjectMapper();
+  static final ObjectMapper MAPPER = new ObjectMapper().registerModules(
+      ObjectMapper.findModules(ReflectHelpers.findClassLoader()));
   private static final ClassLoader CLASS_LOADER;
 
   private static final Map<String, Class<? extends PipelineRunner<?>>> SUPPORTED_PIPELINE_RUNNERS;
@@ -1191,7 +1198,6 @@ public class PipelineOptionsFactory {
         method.property = propertyDescriptor;
         method.methodType = "setter";
         missingBeanMethods.add(method);
-        continue;
       }
     }
     throwForMissingBeanMethod(iface, missingBeanMethods);

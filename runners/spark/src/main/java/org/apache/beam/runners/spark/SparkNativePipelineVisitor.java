@@ -35,8 +35,7 @@ import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
-import org.apache.commons.lang.WordUtils;
-
+import org.apache.commons.text.WordUtils;
 
 /**
  * Pipeline visitor for translating a Beam pipeline into equivalent Spark operations.
@@ -92,7 +91,6 @@ public class SparkNativePipelineVisitor extends SparkRunner.Evaluator {
   @Override
   <TransformT extends PTransform<? super PInput, POutput>> void
   doVisitTransform(TransformHierarchy.Node node) {
-    super.doVisitTransform(node);
     @SuppressWarnings("unchecked")
     TransformT transform = (TransformT) node.getTransform();
     @SuppressWarnings("unchecked")

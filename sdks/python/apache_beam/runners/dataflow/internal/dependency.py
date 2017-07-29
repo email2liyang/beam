@@ -52,6 +52,7 @@ TODO(silviuc): Should we allow several setup packages?
 TODO(silviuc): We should allow customizing the exact command for setup build.
 """
 
+import functools
 import glob
 import logging
 import os
@@ -60,36 +61,65 @@ import shutil
 import sys
 import tempfile
 
-
-from apache_beam import utils
 from apache_beam import version as beam_version
 from apache_beam.internal import pickler
+from apache_beam.io.filesystems import FileSystems
 from apache_beam.runners.dataflow.internal import names
 from apache_beam.utils import processes
-from apache_beam.utils.pipeline_options import GoogleCloudOptions
-from apache_beam.utils.pipeline_options import SetupOptions
+from apache_beam.options.pipeline_options import GoogleCloudOptions
+from apache_beam.options.pipeline_options import SetupOptions
 
+# All constants are for internal use only; no backwards-compatibility
+# guarantees.
 
+# In a released version BEAM_CONTAINER_VERSION and BEAM_FNAPI_CONTAINER_VERSION
+# should match each other, and should be in the same format as the SDK version
+# (i.e. MAJOR.MINOR.PATCH). For non-released (dev) versions, read below.
 # Update this version to the next version whenever there is a change that will
-# require changes to the execution environment.
-BEAM_CONTAINER_VERSION = 'beam-0.6.0-20170223'
+# require changes to legacy Dataflow worker execution environment.
+# This should be in the beam-[version]-[date] format, date is optional.
+BEAM_CONTAINER_VERSION = 'beam-2.1.0-20170626'
+# Update this version to the next version whenever there is a change that
+# requires changes to SDK harness container or SDK harness launcher.
+# This should be in the beam-[version]-[date] format, date is optional.
+BEAM_FNAPI_CONTAINER_VERSION = 'beam-2.1.0-20170621'
 
 # Standard file names used for staging files.
 WORKFLOW_TARBALL_FILE = 'workflow.tar.gz'
 REQUIREMENTS_FILE = 'requirements.txt'
 EXTRA_PACKAGES_FILE = 'extra_packages.txt'
 
+# Package names for different distributions
 GOOGLE_PACKAGE_NAME = 'google-cloud-dataflow'
 BEAM_PACKAGE_NAME = 'apache-beam'
+
+# SDK identifiers for different distributions
+GOOGLE_SDK_NAME = 'Google Cloud Dataflow SDK for Python'
+BEAM_SDK_NAME = 'Apache Beam SDK for Python'
 
 
 def _dependency_file_copy(from_path, to_path):
   """Copies a local file to a GCS file or vice versa."""
   logging.info('file copy from %s to %s.', from_path, to_path)
   if from_path.startswith('gs://') or to_path.startswith('gs://'):
-    command_args = ['gsutil', '-m', '-q', 'cp', from_path, to_path]
-    logging.info('Executing command: %s', command_args)
-    processes.check_call(command_args)
+    from apache_beam.io.gcp import gcsio
+    if from_path.startswith('gs://') and to_path.startswith('gs://'):
+      # Both files are GCS files so copy.
+      gcsio.GcsIO().copy(from_path, to_path)
+    elif to_path.startswith('gs://'):
+      # Only target is a GCS file, read local file and upload.
+      with open(from_path, 'rb') as f:
+        with gcsio.GcsIO().open(to_path, mode='wb') as g:
+          pfun = functools.partial(f.read, gcsio.WRITE_CHUNK_SIZE)
+          for chunk in iter(pfun, ''):
+            g.write(chunk)
+    else:
+      # Source is a GCS file but target is local file.
+      with gcsio.GcsIO().open(from_path, mode='rb') as g:
+        with open(to_path, 'wb') as f:
+          pfun = functools.partial(g.read, gcsio.DEFAULT_READ_BUFFER_SIZE)
+          for chunk in iter(pfun, ''):
+            f.write(chunk)
   else:
     # Branch used only for unit tests and integration tests.
     # In such environments GCS support is not available.
@@ -165,7 +195,12 @@ def _stage_extra_packages(extra_packages, staging_location, temp_dir,
           staging_temp_dir = tempfile.mkdtemp(dir=temp_dir)
         logging.info('Downloading extra package: %s locally before staging',
                      package)
-        _dependency_file_copy(package, staging_temp_dir)
+        if os.path.isfile(staging_temp_dir):
+          local_file_path = staging_temp_dir
+        else:
+          _, last_component = FileSystems.split(package)
+          local_file_path = FileSystems.join(staging_temp_dir, last_component)
+        _dependency_file_copy(package, local_file_path)
       else:
         raise RuntimeError(
             'The file %s cannot be found. It was specified in the '
@@ -175,12 +210,12 @@ def _stage_extra_packages(extra_packages, staging_location, temp_dir,
 
   if staging_temp_dir:
     local_packages.extend(
-        [utils.path.join(staging_temp_dir, f) for f in os.listdir(
+        [FileSystems.join(staging_temp_dir, f) for f in os.listdir(
             staging_temp_dir)])
 
   for package in local_packages:
     basename = os.path.basename(package)
-    staged_path = utils.path.join(staging_location, basename)
+    staged_path = FileSystems.join(staging_location, basename)
     file_copy(package, staged_path)
     resources.append(basename)
   # Create a file containing the list of extra packages and stage it.
@@ -193,7 +228,7 @@ def _stage_extra_packages(extra_packages, staging_location, temp_dir,
   with open(os.path.join(temp_dir, EXTRA_PACKAGES_FILE), 'wt') as f:
     for package in local_packages:
       f.write('%s\n' % os.path.basename(package))
-  staged_path = utils.path.join(staging_location, EXTRA_PACKAGES_FILE)
+  staged_path = FileSystems.join(staging_location, EXTRA_PACKAGES_FILE)
   # Note that the caller of this function is responsible for deleting the
   # temporary folder where all temp files are created, including this one.
   file_copy(os.path.join(temp_dir, EXTRA_PACKAGES_FILE), staged_path)
@@ -229,7 +264,9 @@ def _populate_requirements_cache(requirements_file, cache_dir):
 def stage_job_resources(
     options, file_copy=_dependency_file_copy, build_setup_args=None,
     temp_dir=None, populate_requirements_cache=_populate_requirements_cache):
-  """Creates (if needed) and stages job resources to options.staging_location.
+  """For internal use only; no backwards-compatibility guarantees.
+
+  Creates (if needed) and stages job resources to options.staging_location.
 
   Args:
     options: Command line options. More specifically the function will expect
@@ -274,8 +311,8 @@ def stage_job_resources(
       raise RuntimeError('The file %s cannot be found. It was specified in the '
                          '--requirements_file command line option.' %
                          setup_options.requirements_file)
-    staged_path = utils.path.join(google_cloud_options.staging_location,
-                                  REQUIREMENTS_FILE)
+    staged_path = FileSystems.join(google_cloud_options.staging_location,
+                                   REQUIREMENTS_FILE)
     file_copy(setup_options.requirements_file, staged_path)
     resources.append(REQUIREMENTS_FILE)
     requirements_cache_path = (
@@ -289,8 +326,8 @@ def stage_job_resources(
     populate_requirements_cache(
         setup_options.requirements_file, requirements_cache_path)
     for pkg in  glob.glob(os.path.join(requirements_cache_path, '*')):
-      file_copy(pkg, utils.path.join(google_cloud_options.staging_location,
-                                     os.path.basename(pkg)))
+      file_copy(pkg, FileSystems.join(google_cloud_options.staging_location,
+                                      os.path.basename(pkg)))
       resources.append(os.path.basename(pkg))
 
   # Handle a setup file if present.
@@ -308,8 +345,8 @@ def stage_job_resources(
           'setup.py instead of %s' % setup_options.setup_file)
     tarball_file = _build_setup_package(setup_options.setup_file, temp_dir,
                                         build_setup_args)
-    staged_path = utils.path.join(google_cloud_options.staging_location,
-                                  WORKFLOW_TARBALL_FILE)
+    staged_path = FileSystems.join(google_cloud_options.staging_location,
+                                   WORKFLOW_TARBALL_FILE)
     file_copy(tarball_file, staged_path)
     resources.append(WORKFLOW_TARBALL_FILE)
 
@@ -328,8 +365,8 @@ def stage_job_resources(
     pickled_session_file = os.path.join(temp_dir,
                                         names.PICKLED_MAIN_SESSION_FILE)
     pickler.dump_session(pickled_session_file)
-    staged_path = utils.path.join(google_cloud_options.staging_location,
-                                  names.PICKLED_MAIN_SESSION_FILE)
+    staged_path = FileSystems.join(google_cloud_options.staging_location,
+                                   names.PICKLED_MAIN_SESSION_FILE)
     file_copy(pickled_session_file, staged_path)
     resources.append(names.PICKLED_MAIN_SESSION_FILE)
 
@@ -343,8 +380,8 @@ def stage_job_resources(
     else:
       stage_tarball_from_remote_location = False
 
-    staged_path = utils.path.join(google_cloud_options.staging_location,
-                                  names.DATAFLOW_SDK_TARBALL_FILE)
+    staged_path = FileSystems.join(google_cloud_options.staging_location,
+                                   names.DATAFLOW_SDK_TARBALL_FILE)
     if stage_tarball_from_remote_location:
       # If --sdk_location is not specified then the appropriate package
       # will be obtained from PyPI (https://pypi.python.org) based on the
@@ -451,8 +488,33 @@ def _stage_beam_sdk_tarball(sdk_remote_location, staged_path, temp_dir):
         'type of location: %s' % sdk_remote_location)
 
 
-def get_required_container_version():
-  """Returns the Google Cloud Dataflow container version for remote execution.
+def get_default_container_image_for_current_sdk(job_type):
+  """For internal use only; no backwards-compatibility guarantees.
+
+  Args:
+    job_type (str): BEAM job type.
+
+  Returns:
+    str: Google Cloud Dataflow container image for remote execution.
+  """
+  # TODO(tvalentyn): Use enumerated type instead of strings for job types.
+  if job_type == 'FNAPI_BATCH' or job_type == 'FNAPI_STREAMING':
+    image_name = 'dataflow.gcr.io/v1beta3/python-fnapi'
+  else:
+    image_name = 'dataflow.gcr.io/v1beta3/python'
+  image_tag = _get_required_container_version(job_type)
+  return image_name + ':' + image_tag
+
+
+def _get_required_container_version(job_type=None):
+  """For internal use only; no backwards-compatibility guarantees.
+
+  Args:
+    job_type (str, optional): BEAM job type. Defaults to None.
+
+  Returns:
+    str: The tag of worker container images in GCR that corresponds to
+      current version of the SDK.
   """
   # TODO(silviuc): Handle apache-beam versions when we have official releases.
   import pkg_resources as pkg
@@ -468,26 +530,34 @@ def get_required_container_version():
   except pkg.DistributionNotFound:
     # This case covers Apache Beam end-to-end testing scenarios. All these tests
     # will run with a special container version.
-    return BEAM_CONTAINER_VERSION
+    if job_type == 'FNAPI_BATCH' or job_type == 'FNAPI_STREAMING':
+      return BEAM_FNAPI_CONTAINER_VERSION
+    else:
+      return BEAM_CONTAINER_VERSION
 
 
 def get_sdk_name_and_version():
-  """Returns name and version of SDK reported to Google Cloud Dataflow."""
-  # TODO(ccy): Make this check cleaner.
-  container_version = get_required_container_version()
-  if container_version == BEAM_CONTAINER_VERSION:
-    return ('Apache Beam SDK for Python', beam_version.__version__)
-  else:
-    return ('Google Cloud Dataflow SDK for Python', container_version)
+  """For internal use only; no backwards-compatibility guarantees.
+
+  Returns name and version of SDK reported to Google Cloud Dataflow."""
+  import pkg_resources as pkg
+  container_version = _get_required_container_version()
+  try:
+    pkg.get_distribution(GOOGLE_PACKAGE_NAME)
+    return (GOOGLE_SDK_NAME, container_version)
+  except pkg.DistributionNotFound:
+    return (BEAM_SDK_NAME, beam_version.__version__)
 
 
 def get_sdk_package_name():
-  """Returns the PyPI package name to be staged to Google Cloud Dataflow."""
-  container_version = get_required_container_version()
-  if container_version == BEAM_CONTAINER_VERSION:
-    return BEAM_PACKAGE_NAME
-  else:
+  """For internal use only; no backwards-compatibility guarantees.
+
+  Returns the PyPI package name to be staged to Google Cloud Dataflow."""
+  sdk_name, _ = get_sdk_name_and_version()
+  if sdk_name == GOOGLE_SDK_NAME:
     return GOOGLE_PACKAGE_NAME
+  else:
+    return BEAM_PACKAGE_NAME
 
 
 def _download_pypi_sdk_package(temp_dir):

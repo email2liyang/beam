@@ -53,6 +53,9 @@ public interface DataflowPipelineWorkerPoolOptions extends PipelineOptions {
     /** Use numWorkers machines. Do not autoscale the worker pool. */
     NONE("AUTOSCALING_ALGORITHM_NONE"),
 
+    /**
+     * @deprecated use {@link #THROUGHPUT_BASED}.
+     */
     @Deprecated
     BASIC("AUTOSCALING_ALGORITHM_BASIC"),
 
@@ -128,12 +131,8 @@ public interface DataflowPipelineWorkerPoolOptions extends PipelineOptions {
       implements DefaultValueFactory<String> {
     @Override
     public String create(PipelineOptions options) {
-      DataflowPipelineOptions dataflowOptions = options.as(DataflowPipelineOptions.class);
-      if (dataflowOptions.isStreaming()) {
-        return DataflowRunnerInfo.getDataflowRunnerInfo().getStreamingWorkerHarnessContainerImage();
-      } else {
-        return DataflowRunnerInfo.getDataflowRunnerInfo().getBatchWorkerHarnessContainerImage();
-      }
+      String containerVersion = DataflowRunnerInfo.getDataflowRunnerInfo().getContainerVersion();
+      return String.format("dataflow.gcr.io/v1beta3/IMAGE:%s", containerVersion);
     }
   }
 

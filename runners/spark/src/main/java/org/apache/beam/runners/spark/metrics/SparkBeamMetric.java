@@ -18,28 +18,34 @@
 
 package org.apache.beam.runners.spark.metrics;
 
+import static org.apache.beam.runners.core.metrics.MetricsContainerStepMap.asAttemptedOnlyMetricResults;
+
 import com.codahale.metrics.Metric;
 import com.google.common.annotations.VisibleForTesting;
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.beam.runners.core.metrics.MetricsContainerStepMap;
 import org.apache.beam.sdk.metrics.DistributionResult;
+import org.apache.beam.sdk.metrics.GaugeResult;
 import org.apache.beam.sdk.metrics.MetricName;
 import org.apache.beam.sdk.metrics.MetricQueryResults;
 import org.apache.beam.sdk.metrics.MetricResult;
+import org.apache.beam.sdk.metrics.MetricResults;
 import org.apache.beam.sdk.metrics.MetricsFilter;
 
 
 /**
- * An adapter between the {@link SparkMetricsContainer} and Codahale's {@link Metric} interface.
+ * An adapter between the {@link MetricsContainerStepMap} and Codahale's {@link Metric} interface.
  */
 class SparkBeamMetric implements Metric {
   private static final String ILLEGAL_CHARACTERS = "[^A-Za-z0-9\\._-]";
   private static final String ILLEGAL_CHARACTERS_AND_PERIOD = "[^A-Za-z0-9_-]";
 
-  private final SparkMetricResults metricResults = new SparkMetricResults();
-
   Map<String, ?> renderAll() {
     Map<String, Object> metrics = new HashMap<>();
+    MetricResults metricResults =
+        asAttemptedOnlyMetricResults(
+            MetricsAccumulator.getInstance().value());
     MetricQueryResults metricQueryResults =
         metricResults.queryMetrics(MetricsFilter.builder().build());
     for (MetricResult<Long> metricResult : metricQueryResults.counters()) {
@@ -52,6 +58,9 @@ class SparkBeamMetric implements Metric {
       metrics.put(renderName(metricResult) + ".min", result.min());
       metrics.put(renderName(metricResult) + ".max", result.max());
       metrics.put(renderName(metricResult) + ".mean", result.mean());
+    }
+    for (MetricResult<GaugeResult> metricResult : metricQueryResults.gauges()) {
+      metrics.put(renderName(metricResult), metricResult.attempted().value());
     }
     return metrics;
   }

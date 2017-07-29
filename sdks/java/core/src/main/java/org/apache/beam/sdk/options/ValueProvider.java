@@ -40,13 +40,20 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.Nullable;
+import org.apache.beam.sdk.annotations.Internal;
+import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.values.PCollection;
 
 /**
- * {@link ValueProvider} is an interface which abstracts the notion of
- * fetching a value that may or may not be currently available.  This can be
- * used to parameterize transforms that only read values in at runtime, for
- * example.
+ * A {@link ValueProvider} abstracts the notion of fetching a value that may or may not be currently
+ * available.
+ *
+ * <p>This can be used to parameterize transforms that only read values in at runtime, for example.
+ *
+ * <p>A common task is to create a {@link PCollection} containing the value of this
+ * {@link ValueProvider} regardless of whether it's accessible at construction time or not.
+ * For that, use {@link Create#ofProvider}.
  */
 @JsonSerialize(using = ValueProvider.Serializer.class)
 @JsonDeserialize(using = ValueProvider.Deserializer.class)
@@ -264,8 +271,9 @@ public interface ValueProvider<T> extends Serializable {
   }
 
   /**
-   * Serializer for {@link ValueProvider}.
+   * <b>For internal use only; no backwards compatibility guarantees.</b>
    */
+  @Internal
   class Serializer extends JsonSerializer<ValueProvider<?>> {
     @Override
     public void serialize(ValueProvider<?> value, JsonGenerator jgen,
@@ -279,8 +287,9 @@ public interface ValueProvider<T> extends Serializable {
   }
 
   /**
-   * Deserializer for {@link ValueProvider}, which handles type marshalling.
+   * <b>For internal use only; no backwards compatibility guarantees.</b>
    */
+  @Internal
   class Deserializer extends JsonDeserializer<ValueProvider<?>>
     implements ContextualDeserializer {
 

@@ -17,6 +17,7 @@
  */
 package org.apache.beam.examples.complete;
 
+import com.google.common.base.Optional;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
@@ -28,10 +29,10 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringDelegateCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.extensions.gcp.options.GcsOptions;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.Description;
-import org.apache.beam.sdk.options.GcsOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation;
@@ -121,7 +122,7 @@ public class TfIdf {
     Set<URI> uris = new HashSet<>();
     if (absoluteUri.getScheme().equals("file")) {
       File directory = new File(absoluteUri);
-      for (String entry : directory.list()) {
+      for (String entry : Optional.fromNullable(directory.list()).or(new String[] {})) {
         File path = new File(directory, entry);
         uris.add(path.toURI());
       }
@@ -179,7 +180,7 @@ public class TfIdf {
         }
 
         PCollection<KV<URI, String>> oneUriToLines = pipeline
-            .apply("TextIO.Read(" + uriString + ")", TextIO.Read.from(uriString))
+            .apply("TextIO.Read(" + uriString + ")", TextIO.read().from(uriString))
             .apply("WithKeys(" + uriString + ")", WithKeys.<URI, String>of(uri));
 
         urisToLines = urisToLines.and(oneUriToLines);
@@ -323,7 +324,6 @@ public class TfIdf {
       // presented to each invocation of the DoFn.
       PCollection<KV<String, Double>> wordToDf = wordToDocCount
           .apply("ComputeDocFrequencies", ParDo
-              .withSideInputs(totalDocuments)
               .of(new DoFn<KV<String, Long>, KV<String, Double>>() {
                 @ProcessElement
                 public void processElement(ProcessContext c) {
@@ -335,7 +335,7 @@ public class TfIdf {
 
                   c.output(KV.of(word, documentFrequency));
                 }
-              }));
+              }).withSideInputs(totalDocuments));
 
       // Join the term frequency and document frequency
       // collections, each keyed on the word.
@@ -401,7 +401,7 @@ public class TfIdf {
                   c.element().getValue().getValue()));
             }
           }))
-          .apply(TextIO.Write
+          .apply(TextIO.write()
               .to(output)
               .withSuffix(".csv"));
     }
@@ -410,7 +410,7 @@ public class TfIdf {
   public static void main(String[] args) throws Exception {
     Options options = PipelineOptionsFactory.fromArgs(args).withValidation().as(Options.class);
     Pipeline pipeline = Pipeline.create(options);
-    pipeline.getCoderRegistry().registerCoder(URI.class, StringDelegateCoder.of(URI.class));
+    pipeline.getCoderRegistry().registerCoderForClass(URI.class, StringDelegateCoder.of(URI.class));
 
     pipeline
         .apply(new ReadDocuments(listInputDocuments(options)))

@@ -24,7 +24,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThat;
 
-import com.google.protobuf.ByteString;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.beam.sdk.Pipeline;
@@ -32,13 +32,12 @@ import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.hbase.HBaseIO.HBaseSource;
 import org.apache.beam.sdk.io.range.ByteKey;
 import org.apache.beam.sdk.io.range.ByteKeyRange;
-import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
+import org.apache.beam.sdk.testing.SourceTestUtils;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
@@ -47,6 +46,7 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.BufferedMutator;
 import org.apache.hadoop.hbase.client.Connection;
@@ -66,10 +66,8 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.hamcrest.Matchers;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -77,7 +75,6 @@ import org.junit.runners.JUnit4;
 /**
  * Test HBaseIO.
  */
-@Ignore
 @RunWith(JUnit4.class)
 public class HBaseIOTest {
     @Rule public final transient TestPipeline p = TestPipeline.create();
@@ -99,7 +96,12 @@ public class HBaseIOTest {
         conf.setStrings("hbase.master.hostname", "localhost");
         conf.setStrings("hbase.regionserver.hostname", "localhost");
         htu = new HBaseTestingUtility(conf);
-        htu.startMiniCluster(1, 4);
+
+        // We don't use the full htu.startMiniCluster() to avoid starting unneeded HDFS/MR daemons
+        htu.startMiniZKCluster();
+        MiniHBaseCluster hbm = htu.startMiniHBaseCluster(1, 4);
+        hbm.waitForActiveAndReadyMaster();
+
         admin = htu.getHBaseAdmin();
     }
 
@@ -110,7 +112,8 @@ public class HBaseIOTest {
             admin = null;
         }
         if (htu != null) {
-            htu.shutdownMiniCluster();
+            htu.shutdownMiniHBaseCluster();
+            htu.shutdownMiniZKCluster();
             htu = null;
         }
     }
@@ -159,7 +162,6 @@ public class HBaseIOTest {
 
     /** Tests that when reading from a non-existent table, the read fails. */
     @Test
-    @Category(NeedsRunner.class)
     public void testReadingFailsTableDoesNotExist() throws Exception {
         final String table = "TEST-TABLE-INVALID";
         // Exception will be thrown by read.validate() when read is applied.
@@ -171,7 +173,6 @@ public class HBaseIOTest {
 
     /** Tests that when reading from an empty table, the read succeeds. */
     @Test
-    @Category(NeedsRunner.class)
     public void testReadingEmptyTable() throws Exception {
         final String table = "TEST-EMPTY-TABLE";
         createTable(table);
@@ -180,7 +181,6 @@ public class HBaseIOTest {
     }
 
     @Test
-    @Category(NeedsRunner.class)
     public void testReading() throws Exception {
         final String table = "TEST-MANY-ROWS-TABLE";
         final int numRows = 1001;
@@ -204,7 +204,7 @@ public class HBaseIOTest {
         HBaseIO.Read read = HBaseIO.read().withConfiguration(conf).withTableId(table);
         HBaseSource source = new HBaseSource(read, null /* estimatedSizeBytes */);
         List<? extends BoundedSource<Result>> splits =
-                source.splitIntoBundles(numRows * bytesPerRow / numRegions,
+                source.split(numRows * bytesPerRow / numRegions,
                         null /* options */);
 
         // Test num splits and split equality.
@@ -212,10 +212,25 @@ public class HBaseIOTest {
         assertSourcesEqualReferenceSource(source, splits, null /* options */);
     }
 
+    /** Tests that a {@link HBaseSource} can be read twice, verifying its immutability. */
+    @Test
+    public void testReadingSourceTwice() throws Exception {
+        final String table = "TEST-READING-TWICE";
+        final int numRows = 10;
+
+        // Set up test table data and sample row keys for size estimation and splitting.
+        createTable(table);
+        writeData(table, numRows);
+
+        HBaseIO.Read read = HBaseIO.read().withConfiguration(conf).withTableId(table);
+        HBaseSource source = new HBaseSource(read, null /* estimatedSizeBytes */);
+        assertThat(SourceTestUtils.readFromSource(source, null), hasSize(numRows));
+        // second read.
+        assertThat(SourceTestUtils.readFromSource(source, null), hasSize(numRows));
+    }
 
     /** Tests reading all rows using a filter. */
     @Test
-    @Category(NeedsRunner.class)
     public void testReadingWithFilter() throws Exception {
         final String table = "TEST-FILTER-TABLE";
         final int numRows = 1001;
@@ -236,7 +251,6 @@ public class HBaseIOTest {
      * range [] and that some properties hold across them.
      */
     @Test
-    @Category(NeedsRunner.class)
     public void testReadingWithKeyRange() throws Exception {
         final String table = "TEST-KEY-RANGE-TABLE";
         final int numRows = 1001;
@@ -273,47 +287,45 @@ public class HBaseIOTest {
 
     /** Tests that a record gets written to the service and messages are logged. */
     @Test
-    @Category(NeedsRunner.class)
     public void testWriting() throws Exception {
         final String table = "table";
         final String key = "key";
         final String value = "value";
+        final int numMutations = 100;
 
         createTable(table);
 
-        p.apply("single row", Create.of(makeWrite(key, value)).withCoder(HBaseIO.WRITE_CODER))
-                .apply("write", HBaseIO.write().withConfiguration(conf).withTableId(table));
+        p.apply("multiple rows", Create.of(makeMutations(key, value, numMutations)))
+         .apply("write", HBaseIO.write().withConfiguration(conf).withTableId(table));
         p.run().waitUntilFinish();
 
         List<Result> results = readTable(table, new Scan());
-        assertEquals(1, results.size());
+        assertEquals(numMutations, results.size());
     }
 
     /** Tests that when writing to a non-existent table, the write fails. */
     @Test
     public void testWritingFailsTableDoesNotExist() throws Exception {
-        final String table = "TEST-TABLE";
+        final String table = "TEST-TABLE-DOES-NOT-EXIST";
 
-        PCollection<KV<ByteString, Iterable<Mutation>>> emptyInput =
-                p.apply(Create.empty(HBaseIO.WRITE_CODER));
+        p.apply(Create.empty(HBaseMutationCoder.of()))
+         .apply("write", HBaseIO.write().withConfiguration(conf).withTableId(table));
 
         // Exception will be thrown by write.validate() when write is applied.
         thrown.expect(IllegalArgumentException.class);
         thrown.expectMessage(String.format("Table %s does not exist", table));
-
-        emptyInput.apply("write", HBaseIO.write().withConfiguration(conf).withTableId(table));
+        p.run();
     }
 
     /** Tests that when writing an element fails, the write fails. */
     @Test
-    @Category(NeedsRunner.class)
     public void testWritingFailsBadElement() throws Exception {
-        final String table = "TEST-TABLE";
+        final String table = "TEST-TABLE-BAD-ELEMENT";
         final String key = "KEY";
         createTable(table);
 
-        p.apply(Create.of(makeBadWrite(key)).withCoder(HBaseIO.WRITE_CODER))
-                .apply(HBaseIO.write().withConfiguration(conf).withTableId(table));
+        p.apply(Create.of(makeBadMutation(key)))
+         .apply(HBaseIO.write().withConfiguration(conf).withTableId(table));
 
         thrown.expect(Pipeline.PipelineExecutionException.class);
         thrown.expectCause(Matchers.<Throwable>instanceOf(IllegalArgumentException.class));
@@ -391,26 +403,22 @@ public class HBaseIOTest {
 
     // Beam helper methods
     /** Helper function to make a single row mutation to be written. */
-    private static KV<ByteString, Iterable<Mutation>> makeWrite(String key, String value) {
-        ByteString rowKey = ByteString.copyFromUtf8(key);
+    private static Iterable<Mutation> makeMutations(String key, String value, int numMutations) {
         List<Mutation> mutations = new ArrayList<>();
-        mutations.add(makeMutation(key, value));
-        return KV.of(rowKey, (Iterable<Mutation>) mutations);
+        for (int i = 0; i < numMutations; i++) {
+            mutations.add(makeMutation(key + i, value));
+        }
+        return mutations;
     }
 
-
     private static Mutation makeMutation(String key, String value) {
-        ByteString rowKey = ByteString.copyFromUtf8(key);
-        return new Put(rowKey.toByteArray())
+        return new Put(key.getBytes(StandardCharsets.UTF_8))
                     .addColumn(COLUMN_FAMILY, COLUMN_NAME, Bytes.toBytes(value))
                     .addColumn(COLUMN_FAMILY, COLUMN_EMAIL, Bytes.toBytes(value + "@email.com"));
     }
 
-    private static KV<ByteString, Iterable<Mutation>> makeBadWrite(String key) {
-        Put put = new Put(key.getBytes());
-        List<Mutation> mutations = new ArrayList<>();
-        mutations.add(put);
-        return KV.of(ByteString.copyFromUtf8(key), (Iterable<Mutation>) mutations);
+    private static Mutation makeBadMutation(String key) {
+        return new Put(key.getBytes());
     }
 
     private void runReadTest(HBaseIO.Read read, List<Result> expected) {

@@ -24,13 +24,19 @@ import unittest
 # TODO(BEAM-1555): Test is failing on the service, with FakeSource.
 # from nose.plugins.attrib import attr
 
+import apache_beam as beam
+from apache_beam.io import Read
 from apache_beam.metrics import Metrics
 from apache_beam.pipeline import Pipeline
+from apache_beam.pipeline import PTransformOverride
 from apache_beam.pipeline import PipelineOptions
 from apache_beam.pipeline import PipelineVisitor
 from apache_beam.pvalue import AsSingleton
+from apache_beam.runners import DirectRunner
 from apache_beam.runners.dataflow.native_io.iobase import NativeSource
-from apache_beam.test_pipeline import TestPipeline
+from apache_beam.testing.test_pipeline import TestPipeline
+from apache_beam.testing.util import assert_that
+from apache_beam.testing.util import equal_to
 from apache_beam.transforms import CombineGlobally
 from apache_beam.transforms import Create
 from apache_beam.transforms import FlatMap
@@ -38,10 +44,7 @@ from apache_beam.transforms import Map
 from apache_beam.transforms import DoFn
 from apache_beam.transforms import ParDo
 from apache_beam.transforms import PTransform
-from apache_beam.transforms import Read
 from apache_beam.transforms import WindowInto
-from apache_beam.transforms.util import assert_that
-from apache_beam.transforms.util import equal_to
 from apache_beam.transforms.window import SlidingWindows
 from apache_beam.transforms.window import TimestampedValue
 from apache_beam.utils.timestamp import MIN_TIMESTAMP
@@ -72,6 +75,18 @@ class FakeSource(NativeSource):
 
   def reader(self):
     return FakeSource._Reader(self._vals)
+
+
+class DoubleParDo(beam.PTransform):
+  def expand(self, input):
+    return input | 'Inner' >> beam.Map(lambda a: a * 2)
+
+
+class TripleParDo(beam.PTransform):
+  def expand(self, input):
+    # Keeping labels the same intentionally to make sure that there is no label
+    # conflict due to replacement.
+    return input | 'Inner' >> beam.Map(lambda a: a * 3)
 
 
 class PipelineTest(unittest.TestCase):
@@ -172,9 +187,9 @@ class PipelineTest(unittest.TestCase):
                      set(visitor.visited))
     self.assertEqual(set(visitor.enter_composite),
                      set(visitor.leave_composite))
-    self.assertEqual(2, len(visitor.enter_composite))
-    self.assertEqual(visitor.enter_composite[1].transform, transform)
-    self.assertEqual(visitor.leave_composite[0].transform, transform)
+    self.assertEqual(3, len(visitor.enter_composite))
+    self.assertEqual(visitor.enter_composite[2].transform, transform)
+    self.assertEqual(visitor.leave_composite[1].transform, transform)
 
   def test_apply_custom_transform(self):
     pipeline = TestPipeline()
@@ -252,7 +267,7 @@ class PipelineTest(unittest.TestCase):
 
     # Consumed memory should not be proportional to the number of maps.
     memory_threshold = (
-        get_memory_usage_in_bytes() + (3 * len_elements * num_elements))
+        get_memory_usage_in_bytes() + (5 * len_elements * num_elements))
 
     # Plus small additional slack for memory fluctuations during the test.
     memory_threshold += 10 * (2 ** 20)
@@ -277,11 +292,33 @@ class PipelineTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       with Pipeline() as p:
         # pylint: disable=expression-not-assigned
-        p | Create([ValueError]) | Map(raise_exception)
+        p | Create([ValueError('msg')]) | Map(raise_exception)
 
-  def test_eager_pipeline(self):
-    p = Pipeline('EagerRunner')
-    self.assertEqual([1, 4, 9], p | Create([1, 2, 3]) | Map(lambda x: x*x))
+  # TODO(BEAM-1894).
+  # def test_eager_pipeline(self):
+  #   p = Pipeline('EagerRunner')
+  #   self.assertEqual([1, 4, 9], p | Create([1, 2, 3]) | Map(lambda x: x*x))
+
+  def test_ptransform_overrides(self):
+
+    def my_par_do_matcher(applied_ptransform):
+      return isinstance(applied_ptransform.transform, DoubleParDo)
+
+    class MyParDoOverride(PTransformOverride):
+
+      def get_matcher(self):
+        return my_par_do_matcher
+
+      def get_replacement_transform(self, ptransform):
+        if isinstance(ptransform, DoubleParDo):
+          return TripleParDo()
+        raise ValueError('Unsupported type of transform: %r', ptransform)
+
+    # Using following private variable for testing.
+    DirectRunner._PTRANSFORM_OVERRIDES.append(MyParDoOverride())
+    with Pipeline() as p:
+      pcoll = p | beam.Create([1, 2, 3]) | 'Multiply' >> DoubleParDo()
+      assert_that(pcoll, equal_to([3, 6, 9]))
 
 
 class DoFnTest(unittest.TestCase):
@@ -293,16 +330,6 @@ class DoFnTest(unittest.TestCase):
 
     pipeline = TestPipeline()
     pcoll = pipeline | 'Create' >> Create([1, 2]) | 'Do' >> ParDo(TestDoFn())
-    assert_that(pcoll, equal_to([11, 12]))
-    pipeline.run()
-
-  def test_context_param(self):
-    class TestDoFn(DoFn):
-      def process(self, element, context=DoFn.ContextParam):
-        yield context.element + 10
-
-    pipeline = TestPipeline()
-    pcoll = pipeline | 'Create' >> Create([1, 2])| 'Do' >> ParDo(TestDoFn())
     assert_that(pcoll, equal_to([11, 12]))
     pipeline.run()
 
@@ -437,6 +464,39 @@ class PipelineOptionsTest(unittest.TestCase):
              'display_data']),
         set([attr for attr in dir(options.view_as(Eggs))
              if not attr.startswith('_')]))
+
+
+class RunnerApiTest(unittest.TestCase):
+
+  def test_simple(self):
+    """Tests serializing, deserializing, and running a simple pipeline.
+
+    More extensive tests are done at pipeline.run for each suitable test.
+    """
+    p = beam.Pipeline()
+    p | beam.Create([None]) | beam.Map(lambda x: x)  # pylint: disable=expression-not-assigned
+    proto = p.to_runner_api()
+
+    p2 = Pipeline.from_runner_api(proto, p.runner, p._options)
+    p2.run()
+
+  def test_pickling(self):
+    class MyPTransform(beam.PTransform):
+      pickle_count = [0]
+
+      def expand(self, p):
+        self.p = p
+        return p | beam.Create([None])
+
+      def __reduce__(self):
+        self.pickle_count[0] += 1
+        return str, ()
+
+    p = beam.Pipeline()
+    for k in range(20):
+      p | 'Iter%s' % k >> MyPTransform()  # pylint: disable=expression-not-assigned
+    p.to_runner_api()
+    self.assertEqual(MyPTransform.pickle_count[0], 20)
 
 
 if __name__ == '__main__':

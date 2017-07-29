@@ -35,40 +35,38 @@ import java.util.Collections;
 import java.util.List;
 import org.apache.beam.runners.core.KeyedWorkItem;
 import org.apache.beam.runners.core.KeyedWorkItems;
+import org.apache.beam.runners.core.ReadyCheckingSideInputReader;
 import org.apache.beam.runners.core.StateInternals;
 import org.apache.beam.runners.core.StateNamespace;
 import org.apache.beam.runners.core.StateNamespaces;
 import org.apache.beam.runners.core.StateTag;
 import org.apache.beam.runners.core.StateTags;
-import org.apache.beam.runners.direct.DirectRunner.CommittedBundle;
-import org.apache.beam.runners.direct.DirectRunner.UncommittedBundle;
+import org.apache.beam.runners.core.construction.TransformInputs;
 import org.apache.beam.runners.direct.ParDoMultiOverrideFactory.StatefulParDo;
 import org.apache.beam.runners.direct.WatermarkManager.TimerUpdate;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
+import org.apache.beam.sdk.runners.AppliedPTransform;
+import org.apache.beam.sdk.state.StateSpec;
+import org.apache.beam.sdk.state.StateSpecs;
+import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.apache.beam.sdk.transforms.AppliedPTransform;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.Window;
-import org.apache.beam.sdk.util.ReadyCheckingSideInputReader;
 import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.util.WindowingStrategy;
-import org.apache.beam.sdk.util.state.StateSpec;
-import org.apache.beam.sdk.util.state.StateSpecs;
-import org.apache.beam.sdk.util.state.ValueState;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.beam.sdk.values.WindowingStrategy;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -92,7 +90,7 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
   @Mock private transient UncommittedBundle<Integer> mockUncommittedBundle;
 
   private static final String KEY = "any-key";
-  private transient StateInternals<Object> stateInternals =
+  private transient StateInternals stateInternals =
       CopyOnAccessInMemoryStateInternals.<Object>withUnderlying(KEY, null);
 
   private static final BundleFactory BUNDLE_FACTORY = ImmutableListBundleFactory.create();
@@ -104,7 +102,7 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
   @Before
   public void setup() {
     MockitoAnnotations.initMocks(this);
-    when((StateInternals<Object>) mockStepContext.stateInternals()).thenReturn(stateInternals);
+    when((StateInternals) mockStepContext.stateInternals()).thenReturn(stateInternals);
     when(mockEvaluationContext.createSideInputReader(anyList()))
         .thenReturn(
             SideInputContainer.create(
@@ -130,16 +128,17 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
         input
             .apply(
                 new ParDoMultiOverrideFactory.GbkThenStatefulParDo<>(
-                    ParDo.of(
-                            new DoFn<KV<String, Integer>, Integer>() {
-                              @StateId(stateId)
-                              private final StateSpec<Object, ValueState<String>> spec =
-                                  StateSpecs.value(StringUtf8Coder.of());
+                    new DoFn<KV<String, Integer>, Integer>() {
+                      @StateId(stateId)
+                      private final StateSpec<ValueState<String>> spec =
+                          StateSpecs.value(StringUtf8Coder.of());
 
-                              @ProcessElement
-                              public void process(ProcessContext c) {}
-                            })
-                        .withOutputTags(mainOutput, TupleTagList.empty())))
+                      @ProcessElement
+                      public void process(ProcessContext c) {}
+                    },
+                    mainOutput,
+                    TupleTagList.empty(),
+                    Collections.<PCollectionView<?>>emptyList()))
             .get(mainOutput)
             .setCoder(VarIntCoder.of());
 
@@ -155,8 +154,7 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
     when(mockEvaluationContext.getExecutionContext(
             eq(producingTransform), Mockito.<StructuralKey>any()))
         .thenReturn(mockExecutionContext);
-    when(mockExecutionContext.getOrCreateStepContext(anyString(), anyString()))
-        .thenReturn(mockStepContext);
+    when(mockExecutionContext.getStepContext(anyString())).thenReturn(mockStepContext);
 
     IntervalWindow firstWindow = new IntervalWindow(new Instant(0), new Instant(9));
     IntervalWindow secondWindow = new IntervalWindow(new Instant(10), new Instant(19));
@@ -165,7 +163,7 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
         StateNamespaces.window(IntervalWindow.getCoder(), firstWindow);
     StateNamespace secondWindowNamespace =
         StateNamespaces.window(IntervalWindow.getCoder(), secondWindow);
-    StateTag<Object, ValueState<String>> tag =
+    StateTag<ValueState<String>> tag =
         StateTags.tagForSpec(stateId, StateSpecs.value(StringUtf8Coder.of()));
 
     // Set up non-empty state. We don't mock + verify calls to clear() but instead
@@ -243,17 +241,17 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
         mainInput
             .apply(
                 new ParDoMultiOverrideFactory.GbkThenStatefulParDo<>(
-                    ParDo.withSideInputs(sideInput)
-                        .of(
-                            new DoFn<KV<String, Integer>, Integer>() {
-                              @StateId(stateId)
-                              private final StateSpec<Object, ValueState<String>> spec =
-                                  StateSpecs.value(StringUtf8Coder.of());
+                    new DoFn<KV<String, Integer>, Integer>() {
+                      @StateId(stateId)
+                      private final StateSpec<ValueState<String>> spec =
+                          StateSpecs.value(StringUtf8Coder.of());
 
-                              @ProcessElement
-                              public void process(ProcessContext c) {}
-                            })
-                        .withOutputTags(mainOutput, TupleTagList.empty())))
+                      @ProcessElement
+                      public void process(ProcessContext c) {}
+                    },
+                    mainOutput,
+                    TupleTagList.empty(),
+                    Collections.<PCollectionView<?>>singletonList(sideInput)))
             .get(mainOutput)
             .setCoder(VarIntCoder.of());
 
@@ -270,8 +268,7 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
     when(mockEvaluationContext.getExecutionContext(
             eq(producingTransform), Mockito.<StructuralKey>any()))
         .thenReturn(mockExecutionContext);
-    when(mockExecutionContext.getOrCreateStepContext(anyString(), anyString()))
-        .thenReturn(mockStepContext);
+    when(mockExecutionContext.getStepContext(anyString())).thenReturn(mockStepContext);
     when(mockEvaluationContext.createBundle(Matchers.<PCollection<Integer>>any()))
         .thenReturn(mockUncommittedBundle);
     when(mockStepContext.getTimerUpdate()).thenReturn(TimerUpdate.empty());
@@ -288,11 +285,8 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
     // global window state merely by having the evaluator created. The cleanup logic does not
     // depend on the window.
     String key = "hello";
-    WindowedValue<KV<String, Integer>> firstKv = WindowedValue.of(
-        KV.of(key, 1),
-        new Instant(3),
-        firstWindow,
-        PaneInfo.NO_FIRING);
+    WindowedValue<KV<String, Integer>> firstKv =
+        WindowedValue.of(KV.of(key, 1), new Instant(3), firstWindow, PaneInfo.NO_FIRING);
 
     WindowedValue<KeyedWorkItem<String, KV<String, Integer>>> gbkOutputElement =
         firstKv.withValue(
@@ -307,7 +301,8 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
         BUNDLE_FACTORY
             .createBundle(
                 (PCollection<KeyedWorkItem<String, KV<String, Integer>>>)
-                    Iterables.getOnlyElement(producingTransform.getInputs()).getValue())
+                    Iterables.getOnlyElement(
+                        TransformInputs.nonAdditionalInputs(producingTransform)))
             .add(gbkOutputElement)
             .commit(Instant.now());
     TransformEvaluator<KeyedWorkItem<String, KV<String, Integer>>> evaluator =
@@ -317,8 +312,7 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
 
     // This should push back every element as a KV<String, Iterable<Integer>>
     // in the appropriate window. Since the keys are equal they are single-threaded
-    TransformResult<KeyedWorkItem<String, KV<String, Integer>>> result =
-        evaluator.finishBundle();
+    TransformResult<KeyedWorkItem<String, KV<String, Integer>>> result = evaluator.finishBundle();
 
     List<Integer> pushedBackInts = new ArrayList<>();
 

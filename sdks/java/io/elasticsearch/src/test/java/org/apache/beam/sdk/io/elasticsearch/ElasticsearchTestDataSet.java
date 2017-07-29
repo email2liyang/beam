@@ -17,11 +17,10 @@
  */
 package org.apache.beam.sdk.io.elasticsearch;
 
-import static java.net.InetAddress.getByName;
 
+import org.apache.beam.sdk.io.common.IOTestPipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.elasticsearch.client.transport.TransportClient;
-import org.elasticsearch.common.transport.InetSocketTransportAddress;
+import org.elasticsearch.client.RestClient;
 
 /**
  * Manipulates test data used by the {@link ElasticsearchIO}
@@ -37,7 +36,7 @@ public class ElasticsearchTestDataSet {
   public static final long NUM_DOCS = 60000;
   public static final int AVERAGE_DOC_SIZE = 25;
   public static final int MAX_DOC_SIZE = 35;
-  private static String writeIndex = ES_INDEX + org.joda.time.Instant.now().getMillis();
+  private static final String writeIndex = ES_INDEX + System.currentTimeMillis();
 
   /**
    * Use this to create the index for reading before IT read tests.
@@ -49,7 +48,6 @@ public class ElasticsearchTestDataSet {
    * -Dexec.mainClass=org.apache.beam.sdk.io.elasticsearch.ElasticsearchTestDataSet \
    *   -Dexec.args="--elasticsearchServer=1.2.3.4 \
    *  --elasticsearchHttpPort=9200 \
-   *  --elasticsearchTcpPort=9300" \
    *   -Dexec.classpathScope=test
    *   </pre>
    *
@@ -57,33 +55,22 @@ public class ElasticsearchTestDataSet {
    *     Elasticsearch as shown above.
    */
   public static void main(String[] args) throws Exception {
-    PipelineOptionsFactory.register(ElasticsearchTestOptions.class);
-    ElasticsearchTestOptions options =
-        PipelineOptionsFactory.fromArgs(args).as(ElasticsearchTestOptions.class);
-
-    createAndPopulateIndex(getClient(options), ReadOrWrite.READ);
+    PipelineOptionsFactory.register(IOTestPipelineOptions.class);
+    IOTestPipelineOptions options =
+        PipelineOptionsFactory.fromArgs(args).as(IOTestPipelineOptions.class);
+    createAndPopulateReadIndex(options);
   }
 
-  private static void createAndPopulateIndex(TransportClient client, ReadOrWrite rOw)
-      throws Exception {
+  private static void createAndPopulateReadIndex(IOTestPipelineOptions options) throws Exception {
     // automatically creates the index and insert docs
-    ElasticSearchIOTestUtils.insertTestDocuments(
-        (rOw == ReadOrWrite.READ) ? ES_INDEX : writeIndex, ES_TYPE, NUM_DOCS, client);
+    try (RestClient restClient = getConnectionConfiguration(options, ReadOrWrite.READ)
+        .createClient()) {
+      ElasticSearchIOTestUtils.insertTestDocuments(ES_INDEX, ES_TYPE, NUM_DOCS, restClient);
+    }
   }
 
-  public static TransportClient getClient(ElasticsearchTestOptions options) throws Exception {
-    TransportClient client =
-        TransportClient.builder()
-            .build()
-            .addTransportAddress(
-                new InetSocketTransportAddress(
-                    getByName(options.getElasticsearchServer()),
-                    Integer.valueOf(options.getElasticsearchTcpPort())));
-    return client;
-  }
-
-  public static ElasticsearchIO.ConnectionConfiguration getConnectionConfiguration(
-      ElasticsearchTestOptions options, ReadOrWrite rOw) {
+  static ElasticsearchIO.ConnectionConfiguration getConnectionConfiguration(
+      IOTestPipelineOptions options, ReadOrWrite rOw){
     ElasticsearchIO.ConnectionConfiguration connectionConfiguration =
         ElasticsearchIO.ConnectionConfiguration.create(
             new String[] {
@@ -95,10 +82,11 @@ public class ElasticsearchTestDataSet {
             (rOw == ReadOrWrite.READ) ? ES_INDEX : writeIndex,
             ES_TYPE);
     return connectionConfiguration;
-  };
+  }
 
-  public static void deleteIndex(TransportClient client, ReadOrWrite rOw) throws Exception {
-    ElasticSearchIOTestUtils.deleteIndex((rOw == ReadOrWrite.READ) ? ES_INDEX : writeIndex, client);
+  static void deleteIndex(RestClient restClient, ReadOrWrite rOw) throws Exception {
+    ElasticSearchIOTestUtils
+        .deleteIndex((rOw == ReadOrWrite.READ) ? ES_INDEX : writeIndex, restClient);
   }
 
   /** Enum that tells whether we use the index for reading or for writing. */

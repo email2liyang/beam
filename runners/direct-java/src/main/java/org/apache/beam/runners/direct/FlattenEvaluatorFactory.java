@@ -18,9 +18,7 @@
 package org.apache.beam.runners.direct;
 
 import com.google.common.collect.Iterables;
-import org.apache.beam.runners.direct.DirectRunner.CommittedBundle;
-import org.apache.beam.runners.direct.DirectRunner.UncommittedBundle;
-import org.apache.beam.sdk.transforms.AppliedPTransform;
+import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.transforms.Flatten;
 import org.apache.beam.sdk.transforms.Flatten.PCollections;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -57,7 +55,7 @@ class FlattenEvaluatorFactory implements TransformEvaluatorFactory {
           application) {
     final UncommittedBundle<InputT> outputBundle =
         evaluationContext.createBundle(
-            (PCollection<InputT>) Iterables.getOnlyElement(application.getOutputs()).getValue());
+            (PCollection<InputT>) Iterables.getOnlyElement(application.getOutputs().values()));
     final TransformResult<InputT> result =
         StepTransformResult.<InputT>withoutHold(application).addOutput(outputBundle).build();
     return new FlattenEvaluator<>(outputBundle, result);

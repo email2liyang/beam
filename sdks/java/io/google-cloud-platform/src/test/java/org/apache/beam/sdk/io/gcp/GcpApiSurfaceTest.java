@@ -23,6 +23,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 
 import com.google.common.collect.ImmutableSet;
 import java.util.Set;
+import org.apache.beam.sdk.io.gcp.testing.BigqueryMatcher;
 import org.apache.beam.sdk.util.ApiSurface;
 import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
@@ -42,24 +43,40 @@ public class GcpApiSurfaceTest {
 
     final ApiSurface apiSurface =
         ApiSurface.ofPackage(thisPackage, thisClassLoader)
+            .pruningPattern(BigqueryMatcher.class.getName())
             .pruningPattern("org[.]apache[.]beam[.].*Test.*")
             .pruningPattern("org[.]apache[.]beam[.].*IT")
-            .pruningPattern("java[.]lang.*");
+            .pruningPattern("java[.]lang.*")
+            .pruningPattern("java[.]util.*");
 
     @SuppressWarnings("unchecked")
     final Set<Matcher<Class<?>>> allowedClasses =
         ImmutableSet.of(
+            classesInPackage("com.google.api.core"),
+            classesInPackage("com.google.api.client.googleapis"),
+            classesInPackage("com.google.api.client.http"),
             classesInPackage("com.google.api.client.json"),
             classesInPackage("com.google.api.client.util"),
             classesInPackage("com.google.api.services.bigquery.model"),
             classesInPackage("com.google.auth"),
             classesInPackage("com.google.bigtable.v2"),
             classesInPackage("com.google.cloud.bigtable.config"),
+            classesInPackage("com.google.spanner.v1"),
+            Matchers.<Class<?>>equalTo(com.google.api.gax.grpc.ApiException.class),
+            Matchers.<Class<?>>equalTo(com.google.cloud.bigtable.grpc.BigtableClusterName.class),
             Matchers.<Class<?>>equalTo(com.google.cloud.bigtable.grpc.BigtableInstanceName.class),
             Matchers.<Class<?>>equalTo(com.google.cloud.bigtable.grpc.BigtableTableName.class),
-            // https://github.com/GoogleCloudPlatform/cloud-bigtable-client/pull/1056
-            classesInPackage("com.google.common.collect"),
-            // via Bigtable, PR above out to fix.
+            Matchers.<Class<?>>equalTo(com.google.cloud.BaseServiceException.class),
+            Matchers.<Class<?>>equalTo(com.google.cloud.BaseServiceException.Error.class),
+            Matchers.<Class<?>>equalTo(com.google.cloud.BaseServiceException.ExceptionData.class),
+            Matchers.<Class<?>>equalTo(com.google.cloud.BaseServiceException.ExceptionData.Builder
+                .class),
+            Matchers.<Class<?>>equalTo(com.google.cloud.RetryHelper.RetryHelperException.class),
+            Matchers.<Class<?>>equalTo(com.google.cloud.grpc.BaseGrpcServiceException.class),
+            Matchers.<Class<?>>equalTo(com.google.cloud.ByteArray.class),
+            Matchers.<Class<?>>equalTo(com.google.cloud.Date.class),
+            Matchers.<Class<?>>equalTo(com.google.cloud.Timestamp.class),
+            classesInPackage("com.google.cloud.spanner"),
             classesInPackage("com.google.datastore.v1"),
             classesInPackage("com.google.protobuf"),
             classesInPackage("com.google.type"),
@@ -71,7 +88,6 @@ public class GcpApiSurfaceTest {
             classesInPackage("javax"),
             classesInPackage("org.apache.beam"),
             classesInPackage("org.apache.commons.logging"),
-            // via Bigtable
             classesInPackage("org.joda.time"));
 
     assertThat(apiSurface, containsOnlyClassesMatching(allowedClasses));
