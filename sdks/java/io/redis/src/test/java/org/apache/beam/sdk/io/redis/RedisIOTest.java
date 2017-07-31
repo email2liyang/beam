@@ -34,7 +34,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
-import org.apache.beam.sdk.testing.RunnableOnService;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
@@ -43,7 +42,6 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -78,7 +76,6 @@ public class RedisIOTest {
   }
 
   @Test
-  @Category(RunnableOnService.class)
   public void testGetRead() throws Exception {
     FakeRedisService service = new FakeRedisService();
     for (int i = 0; i < 1000; i++) {
@@ -101,7 +98,6 @@ public class RedisIOTest {
   }
 
   @Test
-  @Category(RunnableOnService.class)
   public void testSetWrite() throws Exception {
     FakeRedisService service = new FakeRedisService();
 
@@ -121,7 +117,6 @@ public class RedisIOTest {
   }
 
   @Test
-  @Category(RunnableOnService.class)
   public void testAppendWrite() throws Exception {
     FakeRedisService service = new FakeRedisService();
 
@@ -147,7 +142,6 @@ public class RedisIOTest {
   }
 
   @Test
-  @Category(RunnableOnService.class)
   public void testPubSubRead() throws Exception {
     final FakeRedisService redisService = new FakeRedisService();
 
@@ -189,7 +183,6 @@ public class RedisIOTest {
   }
 
   @Test
-  @Category(RunnableOnService.class)
   public void testPubSubWrite() throws Exception {
     FakeRedisService redisService = new FakeRedisService();
 

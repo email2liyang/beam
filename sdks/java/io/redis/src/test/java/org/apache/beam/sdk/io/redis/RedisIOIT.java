@@ -27,7 +27,6 @@ import java.util.Collections;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
-import org.apache.beam.sdk.testing.RunnableOnService;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
@@ -37,7 +36,6 @@ import org.apache.beam.sdk.values.PCollection;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.slf4j.Logger;
@@ -59,25 +57,20 @@ import redis.clients.jedis.JedisPubSub;
  *  "--redisLocation=1.2.3.4:6379"]'
  * </pre>
  */
-@RunWith(JUnit4.class)
-public class RedisIOIT {
+@RunWith(JUnit4.class) public class RedisIOIT {
 
   private static final Logger LOG = LoggerFactory.getLogger(RedisIOIT.class);
 
-  @Rule
-  public TestPipeline pipeline = TestPipeline.create();
+  @Rule public TestPipeline pipeline = TestPipeline.create();
 
   private static RedisTestOptions options;
 
-  @BeforeClass
-  public static void setup() throws Exception {
+  @BeforeClass public static void setup() throws Exception {
     PipelineOptionsFactory.register(RedisTestOptions.class);
     options = TestPipeline.testingPipelineOptions().as(RedisTestOptions.class);
   }
 
-  @Test
-  @Category(RunnableOnService.class)
-  public void testEstimatedSizeBytes() throws Exception {
+  @Test public void testEstimatedSizeBytes() throws Exception {
     Jedis jedis = RedisTestDataSet.getJedis(options);
     jedis.connect();
     for (int i = 0; i < 10; i++) {
@@ -88,27 +81,23 @@ public class RedisIOIT {
     PipelineOptions pipelineOptions = PipelineOptionsFactory.create();
     RedisIO.RedisSource source = new RedisIO.RedisSource("*",
         new SerializableFunction<PipelineOptions, RedisService>() {
-      @Override
-      public RedisService apply(PipelineOptions input) {
-        return new RedisServiceImpl(
-            RedisConnection.create(Collections.singletonList(options.getRedisLocation())));
-      }
-    });
+
+          @Override public RedisService apply(PipelineOptions input) {
+            return new RedisServiceImpl(
+                RedisConnection.create(Collections.singletonList(options.getRedisLocation())));
+          }
+        });
     long estimatedSizeBytes = source.getEstimatedSizeBytes(pipelineOptions);
     LOG.info("Estimated size: {}", estimatedSizeBytes);
     assertEquals(100, estimatedSizeBytes);
   }
 
-  @Test
-  @Category(RunnableOnService.class)
-  public void testGetRead() throws Exception {
+  @Test public void testGetRead() throws Exception {
     Jedis jedis = RedisTestDataSet.getJedis(options);
     RedisTestDataSet.createTestDataset(jedis);
 
-    PCollection<KV<String, String>> output =
-        pipeline.apply(RedisIO.read()
-            .withConnection(
-                RedisConnection.create(Collections.singletonList(options.getRedisLocation()))));
+    PCollection<KV<String, String>> output = pipeline.apply(RedisIO.read().withConnection(
+        RedisConnection.create(Collections.singletonList(options.getRedisLocation()))));
 
     PAssert.thatSingleton(output.apply("Count", Count.<KV<String, String>>globally()))
         .isEqualTo(1000L);
@@ -124,18 +113,36 @@ public class RedisIOIT {
     RedisTestDataSet.deleteTestDataset(jedis);
   }
 
-  @Test
-  @Category(RunnableOnService.class)
-  public void testSetWrite() throws Exception {
+  @Test public void testAppendWrite() throws Exception {
+    Jedis jedis = RedisTestDataSet.getJedis(options);
+    RedisTestDataSet.createTestDataset(jedis);
+
+    ArrayList<KV<String, String>> data = new ArrayList<>();
+    for (int i = 0; i < 1000; i++) {
+      KV<String, String> kv = KV.of("Key " + i, " Appended");
+      data.add(kv);
+    }
+    pipeline.apply(Create.of(data)).apply(RedisIO.write().withConnection(
+        RedisConnection.create(Collections.singletonList(options.getRedisLocation())))
+        .withCommand(RedisIO.Write.Command.APPEND));
+    pipeline.run();
+
+    for (int i = 0; i < 1000; i++) {
+      String value = jedis.get("Key " + i);
+      assertEquals("Value " + i + " Appended", value);
+    }
+
+    RedisTestDataSet.deleteTestDataset(jedis);
+  }
+
+  @Test public void testSetWrite() throws Exception {
     ArrayList<KV<String, String>> data = new ArrayList<>();
     for (int i = 0; i < 1000; i++) {
       KV<String, String> kv = KV.of("Key " + i, "Value " + i);
       data.add(kv);
     }
-    pipeline.apply(Create.of(data))
-        .apply(RedisIO.write()
-            .withConnection(
-                RedisConnection.create(Collections.singletonList(options.getRedisLocation()))));
+    pipeline.apply(Create.of(data)).apply(RedisIO.write().withConnection(
+        RedisConnection.create(Collections.singletonList(options.getRedisLocation()))));
     pipeline.run();
 
     Jedis jedis = RedisTestDataSet.getJedis(options);
@@ -147,37 +154,10 @@ public class RedisIOIT {
     RedisTestDataSet.deleteTestDataset(jedis);
   }
 
-  @Test
-  @Category(RunnableOnService.class)
-  public void testAppendWrite() throws Exception {
-    Jedis jedis = RedisTestDataSet.getJedis(options);
-    RedisTestDataSet.createTestDataset(jedis);
-
-    ArrayList<KV<String, String>> data = new ArrayList<>();
-    for (int i = 0; i < 1000; i++) {
-      KV<String, String> kv = KV.of("Key " + i, " Appended");
-      data.add(kv);
-    }
-    pipeline.apply(Create.of(data))
-        .apply(RedisIO.write()
-            .withConnection(
-                RedisConnection.create(Collections.singletonList(options.getRedisLocation())))
-            .withCommand(RedisIO.Write.Command.APPEND));
-    pipeline.run();
-
-    for (int i = 0; i < 1000; i++) {
-      String value = jedis.get("Key " + i);
-      assertEquals("Value " + i +  " Appended", value);
-    }
-
-    RedisTestDataSet.deleteTestDataset(jedis);
-  }
-
-  @Test
-  @Category(RunnableOnService.class)
-  public void readPubSubChannelRead() throws Exception {
+  @Test public void readPubSubChannelRead() throws Exception {
     final Jedis jedis = RedisTestDataSet.getJedis(options);
     Thread publisher = new Thread() {
+
       public void run() {
         try {
           Thread.sleep(1000);
@@ -207,14 +187,12 @@ public class RedisIOIT {
     publisher.join();
   }
 
-  @Test
-  @Category(RunnableOnService.class)
-  public void testPubSubPatternRead() throws Exception {
+  @Test public void testPubSubPatternRead() throws Exception {
     LOG.info("Creating publisher");
     final Jedis jedis = RedisTestDataSet.getJedis(options);
     Thread publisher = new Thread() {
-      @Override
-      public void run() {
+
+      @Override public void run() {
         try {
           Thread.sleep(1000);
           for (int i = 0; i < 1000; i++) {
@@ -227,11 +205,9 @@ public class RedisIOIT {
     };
 
     LOG.info("Creating test pipeline");
-    PCollection<String> output = pipeline.apply(RedisPubSubIO.read()
-        .withConnection(
-            RedisConnection.create(Collections.singletonList(options.getRedisLocation())))
-        .withPatterns(Collections.singletonList("TEST_P*"))
-        .withMaxNumRecords(1000));
+    PCollection<String> output = pipeline.apply(RedisPubSubIO.read().withConnection(
+        RedisConnection.create(Collections.singletonList(options.getRedisLocation())))
+        .withPatterns(Collections.singletonList("TEST_P*")).withMaxNumRecords(1000));
     PAssert.thatSingleton(output.apply("Count", Count.<String>globally())).isEqualTo(1000L);
 
     ArrayList<String> expected = new ArrayList<>();
@@ -247,20 +223,18 @@ public class RedisIOIT {
     publisher.join();
   }
 
-  @Test
-  @Category(RunnableOnService.class)
-  public void testPubSubWrite() throws Exception {
+  @Test public void testPubSubWrite() throws Exception {
     final ArrayList<String> messages = new ArrayList<>();
 
     LOG.info("Starting Redis subscriber");
     final Jedis jedis = RedisTestDataSet.getJedis(options);
     Thread subscriber = new Thread() {
-      @Override
-      public void run() {
+
+      @Override public void run() {
         LOG.info("Starting Redis subscriber thread");
         jedis.subscribe(new JedisPubSub() {
-          @Override
-          public void onMessage(String channel, String message) {
+
+          @Override public void onMessage(String channel, String message) {
             messages.add(message);
             if (messages.size() == 1000) {
               unsubscribe();
@@ -276,11 +250,9 @@ public class RedisIOIT {
     for (int i = 0; i < 1000; i++) {
       data.add("Test " + i);
     }
-    pipeline.apply(Create.of(data))
-        .apply(RedisPubSubIO.write()
-            .withConnection(
-                RedisConnection.create(Collections.singletonList(options.getRedisLocation())))
-            .withChannels(Collections.singletonList(options.getRedisPubSubChannel())));
+    pipeline.apply(Create.of(data)).apply(RedisPubSubIO.write().withConnection(
+        RedisConnection.create(Collections.singletonList(options.getRedisLocation())))
+        .withChannels(Collections.singletonList(options.getRedisPubSubChannel())));
     pipeline.run();
     subscriber.join();
 

@@ -82,20 +82,18 @@ import org.slf4j.LoggerFactory;
  *      .withConnection(RedisConnection.create(Collections.singletonList("localhost:6379")))
  *
  * }</pre>
- *
  */
 public class RedisIO {
 
   private static final Logger LOG = LoggerFactory.getLogger(RedisIO.class);
 
   public static Read read() {
-    return new  AutoValue_RedisIO_Read.Builder()
-        .setCommand(Read.Command.GET).setKeyPattern("*").build();
+    return new AutoValue_RedisIO_Read.Builder().setCommand(Read.Command.GET).setKeyPattern("*")
+        .build();
   }
 
   public static Write write() {
-    return new AutoValue_RedisIO_Write.Builder()
-        .setCommand(Write.Command.SET).build();
+    return new AutoValue_RedisIO_Write.Builder().setCommand(Write.Command.SET).build();
   }
 
   private RedisIO() {
@@ -104,8 +102,8 @@ public class RedisIO {
   /**
    * A {@link PTransform} reading key/value pairs from a Redis database.
    */
-  @AutoValue
-  public abstract static class Read extends PTransform<PBegin, PCollection<KV<String, String>>> {
+  @AutoValue public abstract static class Read
+      extends PTransform<PBegin, PCollection<KV<String, String>>> {
 
     /**
      * The Redis commands related to read of key-value pairs.
@@ -115,18 +113,25 @@ public class RedisIO {
     }
 
     @Nullable abstract RedisConnection connection();
+
     @Nullable abstract Command command();
+
     @Nullable abstract String keyPattern();
+
     @Nullable abstract RedisService redisService();
 
     abstract Builder builder();
 
-    @AutoValue.Builder
-    abstract static class Builder {
+    @AutoValue.Builder abstract static class Builder {
+
       @Nullable abstract Builder setConnection(RedisConnection connection);
+
       @Nullable abstract Builder setCommand(Command command);
+
       @Nullable abstract Builder setKeyPattern(String keyPattern);
+
       @Nullable abstract Builder setRedisService(RedisService redisService);
+
       abstract Read build();
     }
 
@@ -137,8 +142,8 @@ public class RedisIO {
      * @return The corresponding {@link Read} {@link PTransform}.
      */
     public Read withConnection(RedisConnection connection) {
-      checkArgument(connection != null, "RedisIO.read().withConnection(connection) called with "
-          + "null connection");
+      checkArgument(connection != null,
+          "RedisIO.read().withConnection(connection) called with " + "null connection");
       return builder().setConnection(connection).build();
     }
 
@@ -149,19 +154,20 @@ public class RedisIO {
      * @return The corresponding {@link Read} {@link PTransform}.
      */
     public Read withCommand(Command command) {
-      checkArgument(command != null, "RedisIO.read().withCommand(command) called with null "
-          + "command");
+      checkArgument(command != null,
+          "RedisIO.read().withCommand(command) called with null " + "command");
       return builder().setCommand(command).build();
     }
 
     /**
      * Define the pattern to filter the Redis keys.
+     *
      * @param keyPattern The filter key pattern.
      * @return The corresponding {@link Read} {@link PTransform}.
      */
     public Read withKeyPattern(String keyPattern) {
-      checkArgument(keyPattern != null, "RedisIO.read().withKeyPattern(pattern) called with "
-          + "null pattern");
+      checkArgument(keyPattern != null,
+          "RedisIO.read().withKeyPattern(pattern) called with " + "null pattern");
       return builder().setKeyPattern(keyPattern).build();
     }
 
@@ -172,39 +178,33 @@ public class RedisIO {
      * @return The corresponding {@link Read} {@link PTransform}.
      */
     public Read withRedisService(RedisService redisService) {
-      checkArgument(redisService != null, "RedisIO.read().withRedisService(service) called with"
-          + " null service");
+      checkArgument(redisService != null,
+          "RedisIO.read().withRedisService(service) called with" + " null service");
       return builder().setRedisService(redisService).build();
     }
 
-    @Override
-    public void validate(PBegin input) {
+    @Override public void validate(PipelineOptions options) {
       checkState(connection() != null || redisService() != null, "RedisIO.read() requires a "
           + "connection to be set withConnection(connection) or a service to be set "
           + "withRedisService(service)");
-      checkState(command() != null,  "RedisIO.read() requires a command to be set via "
-          + "withCommand(command)");
-      checkState(keyPattern() != null, "RedisIO.read() requires a key pattern to be set via "
-          + "withKeyPattern(keyPattern");
+      checkState(command() != null,
+          "RedisIO.read() requires a command to be set via " + "withCommand(command)");
+      checkState(keyPattern() != null,
+          "RedisIO.read() requires a key pattern to be set via " + "withKeyPattern(keyPattern");
     }
 
-    @Override
-    public void populateDisplayData(DisplayData.Builder builder) {
+    @Override public void populateDisplayData(DisplayData.Builder builder) {
       if (connection() != null) {
         connection().populateDisplayData(builder);
       }
       builder.addIfNotNull(DisplayData.item("command", command().toString()));
     }
 
-    @Override
-    public PCollection<KV<String, String>> expand(PBegin input) {
-      return input.getPipeline()
-          .apply(org.apache.beam.sdk.io.Read.from(
-              new RedisSource(
-                  keyPattern(),
-                  new SerializableFunction<PipelineOptions, RedisService>() {
-            @Override
-            public RedisService apply(PipelineOptions pipelineOptions) {
+    @Override public PCollection<KV<String, String>> expand(PBegin input) {
+      return input.getPipeline().apply(org.apache.beam.sdk.io.Read.from(
+          new RedisSource(keyPattern(), new SerializableFunction<PipelineOptions, RedisService>() {
+
+            @Override public RedisService apply(PipelineOptions pipelineOptions) {
               return getRedisService(pipelineOptions);
             }
           })));
@@ -215,8 +215,7 @@ public class RedisIO {
      * {@link #withRedisService(RedisService)} or creates and returns an implementation of a
      * concrete Redis service dealing with an actual Redis server.
      */
-    @VisibleForTesting
-    RedisService getRedisService(PipelineOptions pipelineOptions) {
+    @VisibleForTesting RedisService getRedisService(PipelineOptions pipelineOptions) {
       if (redisService() != null) {
         return redisService();
       }
@@ -235,14 +234,13 @@ public class RedisIO {
     private final SerializableFunction<PipelineOptions, RedisService> serviceFactory;
 
     protected RedisSource(String keyPattern,
-                          SerializableFunction<PipelineOptions, RedisService> serviceFactory) {
+        SerializableFunction<PipelineOptions, RedisService> serviceFactory) {
       this.keyPattern = keyPattern;
       this.serviceFactory = serviceFactory;
     }
 
-    @Override
-    public List<RedisSource> splitIntoBundles(long desiredBundleSizeBytes,
-                                              PipelineOptions pipelineOptions) {
+    @Override public List<RedisSource> split(long desiredBundleSizeBytes,
+        PipelineOptions pipelineOptions) {
       // TODO cluster with one source per slot
       return Collections.singletonList(this);
     }
@@ -255,23 +253,20 @@ public class RedisIO {
      * @param pipelineOptions The pipeline options.
      * @return The estimated size of the Redis database in bytes.
      */
-    @Override
-    public long getEstimatedSizeBytes(PipelineOptions pipelineOptions) throws Exception {
+    @Override public long getEstimatedSizeBytes(PipelineOptions pipelineOptions) throws Exception {
       return serviceFactory.apply(pipelineOptions).getEstimatedSizeBytes();
     }
 
-    @Override
-    public BoundedReader<KV<String, String>> createReader(PipelineOptions pipelineOptions) {
+    @Override public BoundedReader<KV<String, String>> createReader(
+        PipelineOptions pipelineOptions) {
       return new RedisReader(this, serviceFactory.apply(pipelineOptions));
     }
 
-    @Override
-    public void validate() {
+    @Override public void validate() {
       // done in the Read
     }
 
-    @Override
-    public Coder<KV<String, String>> getDefaultOutputCoder() {
+    @Override public Coder<KV<String, String>> getDefaultOutputCoder() {
       return KvCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of());
     }
 
@@ -288,30 +283,25 @@ public class RedisIO {
       this.service = service;
     }
 
-    @Override
-    public boolean start() throws IOException {
+    @Override public boolean start() throws IOException {
       reader = service.createReader(source.keyPattern);
       return reader.start();
     }
 
-    @Override
-    public boolean advance() throws IOException {
+    @Override public boolean advance() throws IOException {
       return reader.advance();
     }
 
-    @Override
-    public void close() throws IOException {
+    @Override public void close() throws IOException {
       reader.close();
       reader = null;
     }
 
-    @Override
-    public KV<String, String> getCurrent() {
+    @Override public KV<String, String> getCurrent() {
       return reader.getCurrent();
     }
 
-    @Override
-    public RedisSource getCurrentSource() {
+    @Override public RedisSource getCurrentSource() {
       return source;
     }
 
@@ -320,8 +310,8 @@ public class RedisIO {
   /**
    * A {@link PTransform} to store or update key/value pair in a Redis database.
    */
-  @AutoValue
-  public abstract static class Write extends PTransform<PCollection<KV<String, String>>, PDone> {
+  @AutoValue public abstract static class Write
+      extends PTransform<PCollection<KV<String, String>>, PDone> {
 
     /**
      * Redis commands related to store of key-value pairs.
@@ -331,16 +321,21 @@ public class RedisIO {
     }
 
     @Nullable abstract RedisConnection connection();
+
     @Nullable abstract Command command();
+
     @Nullable abstract RedisService redisService();
 
     abstract Builder builder();
 
-    @AutoValue.Builder
-    abstract static class Builder {
+    @AutoValue.Builder abstract static class Builder {
+
       abstract Builder setConnection(RedisConnection connection);
+
       abstract Builder setCommand(Command command);
+
       abstract Builder setRedisService(RedisService redisService);
+
       abstract Write build();
     }
 
@@ -351,8 +346,8 @@ public class RedisIO {
      * @return The corresponding {@link Write} {@link PTransform}.
      */
     public Write withConnection(RedisConnection connection) {
-      checkArgument(connection != null, "RedisIO.write().withConnection(connection) called with"
-          + " null connection");
+      checkArgument(connection != null,
+          "RedisIO.write().withConnection(connection) called with" + " null connection");
       return builder().setConnection(connection).build();
     }
 
@@ -363,8 +358,8 @@ public class RedisIO {
      * @return The corresponding {@link Write} {@link PTransform}.
      */
     public Write withCommand(Command command) {
-      checkArgument(command != null, "RedisIO.write().withCommand(command) called with null "
-          + "command");
+      checkArgument(command != null,
+          "RedisIO.write().withCommand(command) called with null " + "command");
       return builder().setCommand(command).build();
     }
 
@@ -375,30 +370,27 @@ public class RedisIO {
      * @return The corresponding {@link Write} {@link PTransform}.
      */
     public Write withRedisService(RedisService redisService) {
-      checkArgument(redisService != null, "RedisIO.write().withRedisService(service) called "
-          + "with null service");
+      checkArgument(redisService != null,
+          "RedisIO.write().withRedisService(service) called " + "with null service");
       return builder().setRedisService(redisService).build();
     }
 
-    @Override
-    public PDone expand(PCollection<KV<String, String>> input) {
-      input.apply(ParDo.of(new WriteFn(this,
-          new SerializableFunction<PipelineOptions, RedisService>() {
-        @Override
-        public RedisService apply(PipelineOptions input) {
-          return getRedisService(input);
-        }
-      })));
+    @Override public PDone expand(PCollection<KV<String, String>> input) {
+      input.apply(
+          ParDo.of(new WriteFn(this, new SerializableFunction<PipelineOptions, RedisService>() {
+
+            @Override public RedisService apply(PipelineOptions input) {
+              return getRedisService(input);
+            }
+          })));
       return PDone.in(input.getPipeline());
     }
 
-    @Override
-    public void validate(PCollection<KV<String, String>> input) {
+    @Override public void validate(PipelineOptions options) {
       checkState(command() != null, "Command is null");
     }
 
-    @Override
-    public void populateDisplayData(DisplayData.Builder builder) {
+    @Override public void populateDisplayData(DisplayData.Builder builder) {
       if (connection() != null) {
         connection().populateDisplayData(builder);
       }
@@ -424,27 +416,24 @@ public class RedisIO {
       private RedisService.Writer writer;
 
       public WriteFn(Write spec,
-                     SerializableFunction<PipelineOptions, RedisService> redisServiceFactory) {
+          SerializableFunction<PipelineOptions, RedisService> redisServiceFactory) {
         this.spec = spec;
         this.redisServiceFactory = redisServiceFactory;
       }
 
-      @StartBundle
-      public void startBundle(Context context) throws Exception {
+      @StartBundle public void startBundle(StartBundleContext context) throws Exception {
         if (writer == null) {
           writer = redisServiceFactory.apply(context.getPipelineOptions()).createWriter();
           writer.start();
         }
       }
 
-      @ProcessElement
-      public void processElements(ProcessContext processContext) throws Exception {
+      @ProcessElement public void processElements(ProcessContext processContext) throws Exception {
         KV<String, String> element = processContext.element();
         writer.write(element, spec.command());
       }
 
-      @Teardown
-      public void teardown() throws Exception {
+      @Teardown public void teardown() throws Exception {
         writer.close();
       }
 

@@ -97,8 +97,8 @@ public class RedisPubSubIO {
   private static final Logger LOG = LoggerFactory.getLogger(RedisPubSubIO.class);
 
   public static Read read() {
-    return new AutoValue_RedisPubSubIO_Read.Builder()
-        .setMaxReadTime(null).setMaxNumRecords(Long.MAX_VALUE).build();
+    return new AutoValue_RedisPubSubIO_Read.Builder().setMaxReadTime(null)
+        .setMaxNumRecords(Long.MAX_VALUE).build();
   }
 
   public static Write write() {
@@ -111,26 +111,36 @@ public class RedisPubSubIO {
   /**
    * A {@link PTransform} to read from Redis PubSub.
    */
-  @AutoValue
-  public abstract static class Read extends PTransform<PBegin, PCollection<String>> {
+  @AutoValue public abstract static class Read extends PTransform<PBegin, PCollection<String>> {
 
     @Nullable abstract RedisConnection connection();
+
     @Nullable abstract RedisService redisService();
+
     @Nullable abstract List<String> channels();
+
     @Nullable abstract List<String> patterns();
+
     abstract long maxNumRecords();
+
     @Nullable abstract Duration maxReadTime();
 
     abstract Builder builder();
 
-    @AutoValue.Builder
-    abstract static class Builder {
+    @AutoValue.Builder abstract static class Builder {
+
       abstract Builder setConnection(RedisConnection connection);
+
       abstract Builder setRedisService(RedisService redisService);
+
       abstract Builder setChannels(List<String> channels);
+
       abstract Builder setPatterns(List<String> patterns);
+
       abstract Builder setMaxNumRecords(long maxNumRecords);
+
       abstract Builder setMaxReadTime(Duration maxReadTime);
+
       abstract Read build();
     }
 
@@ -141,8 +151,8 @@ public class RedisPubSubIO {
      * @return The corresponding {@link Read} {@link PTransform}.
      */
     public Read withConnection(RedisConnection connection) {
-      checkArgument(connection != null, "RedisPubSubIO.read().withConnection"
-          + "(connection) called with null connection");
+      checkArgument(connection != null,
+          "RedisPubSubIO.read().withConnection" + "(connection) called with null connection");
       return builder().setConnection(connection).build();
     }
 
@@ -153,8 +163,8 @@ public class RedisPubSubIO {
      * @return The corresponding {@link Read} {@link PTransform}.
      */
     public Read withRedisService(RedisService redisService) {
-      checkArgument(redisService != null, "RedisPubSubIO.read().withRedisService(service) "
-          + "called with null service");
+      checkArgument(redisService != null,
+          "RedisPubSubIO.read().withRedisService(service) " + "called with null service");
       return builder().setRedisService(redisService).build();
     }
 
@@ -165,10 +175,10 @@ public class RedisPubSubIO {
      * @return The corresponding {@link Read} {@link PTransform}.
      */
     public Read withChannels(List<String> channels) {
-      checkArgument(channels != null, "RedisPubSubIO.read().withChannels(channels) called with "
-          + "null channels");
-      checkArgument(!channels.isEmpty(), "RedisPubSubIO.read().withChannels(channels) called "
-          + "with empty channels list");
+      checkArgument(channels != null,
+          "RedisPubSubIO.read().withChannels(channels) called with " + "null channels");
+      checkArgument(!channels.isEmpty(),
+          "RedisPubSubIO.read().withChannels(channels) called " + "with empty channels list");
       return builder().setChannels(channels).build();
     }
 
@@ -179,10 +189,10 @@ public class RedisPubSubIO {
      * @return The corresponding {@link Read} {@link PTransform}.
      */
     public Read withPatterns(List<String> patterns) {
-      checkArgument(patterns != null, "RedisPubSubIO.read().withPatterns(patterns) called with "
-          + "null patterns");
-      checkArgument(!patterns.isEmpty(), "RedisPubSubIO.read().withPatterns(patterns) called "
-          + "with empty patterns list");
+      checkArgument(patterns != null,
+          "RedisPubSubIO.read().withPatterns(patterns) called with " + "null patterns");
+      checkArgument(!patterns.isEmpty(),
+          "RedisPubSubIO.read().withPatterns(patterns) called " + "with empty patterns list");
       return builder().setPatterns(patterns).build();
     }
 
@@ -207,18 +217,17 @@ public class RedisPubSubIO {
      * @return The corresponding Read {@link PTransform}.
      */
     public Read withMaxReadTime(Duration maxReadTime) {
-      checkArgument(maxNumRecords() == Long.MAX_VALUE, "maxNumRecords and maxReadTime are "
-          + "exclusive");
+      checkArgument(maxNumRecords() == Long.MAX_VALUE,
+          "maxNumRecords and maxReadTime are " + "exclusive");
       return builder().setMaxReadTime(maxReadTime).build();
     }
 
-    @Override
-    public PCollection<String> expand(PBegin input) {
-      org.apache.beam.sdk.io.Read.Unbounded<String> unbounded =
-          org.apache.beam.sdk.io.Read.from(new UnboundedRedisPubSubSource(this,
+    @Override public PCollection<String> expand(PBegin input) {
+      org.apache.beam.sdk.io.Read.Unbounded<String> unbounded = org.apache.beam.sdk.io.Read.from(
+          new UnboundedRedisPubSubSource(this,
               new SerializableFunction<PipelineOptions, RedisService>() {
-                @Override
-                public RedisService apply(PipelineOptions input) {
+
+                @Override public RedisService apply(PipelineOptions input) {
                   return getRedisService(input);
                 }
               }));
@@ -234,8 +243,7 @@ public class RedisPubSubIO {
       return input.getPipeline().apply(transform);
     }
 
-    @Override
-    public void validate(PBegin input) {
+    @Override public void validate(PipelineOptions options) {
       checkState(connection() != null || redisService() != null, "RedisPubSubIO.read() requires"
           + " a connection to be set via withConnection(connection) or a Redis service to be set "
           + "via withRedisService(service)");
@@ -244,8 +252,7 @@ public class RedisPubSubIO {
           + "(patterns)");
     }
 
-    @Override
-    public void populateDisplayData(DisplayData.Builder builder) {
+    @Override public void populateDisplayData(DisplayData.Builder builder) {
       super.populateDisplayData(builder);
       if (connection() != null) {
         connection().populateDisplayData(builder);
@@ -261,8 +268,7 @@ public class RedisPubSubIO {
      * {@link #withRedisService(RedisService)} or creates and returns an implementation of a
      * concrete Redis service dealing with an actual Redis server.
      */
-    @VisibleForTesting
-    RedisService getRedisService(PipelineOptions pipelineOptions) {
+    @VisibleForTesting RedisService getRedisService(PipelineOptions pipelineOptions) {
       if (redisService() != null) {
         return redisService();
       }
@@ -278,42 +284,35 @@ public class RedisPubSubIO {
     private final SerializableFunction<PipelineOptions, RedisService> serviceFactory;
 
     public UnboundedRedisPubSubSource(Read spec,
-                                      SerializableFunction<PipelineOptions, RedisService>
-                                          serviceFactory) {
+        SerializableFunction<PipelineOptions, RedisService> serviceFactory) {
       this.spec = spec;
       this.serviceFactory = serviceFactory;
     }
 
-    @Override
-    public UnboundedReader<String> createReader(PipelineOptions pipelineOptions,
-                                                CheckpointMark checkpointMark) {
+    @Override public UnboundedReader<String> createReader(PipelineOptions pipelineOptions,
+        CheckpointMark checkpointMark) {
       return new UnboundedRedisPubSubReader(this, serviceFactory.apply(pipelineOptions));
     }
 
-    @Override
-    public List<UnboundedRedisPubSubSource> generateInitialSplits(int desiredNumSplits,
-                                                                  PipelineOptions pipelineOptions) {
+    @Override public List<UnboundedRedisPubSubSource> split(int desiredNumSplits,
+        PipelineOptions pipelineOptions) {
       // Redis PubSub doesn't provide any dedup, so we create an unique subscriber
       return Collections.singletonList(new UnboundedRedisPubSubSource(spec, serviceFactory));
     }
 
-    @Override
-    public void validate() {
+    @Override public void validate() {
       spec.validate(null);
     }
 
-    @Override
-    public void populateDisplayData(DisplayData.Builder builder) {
+    @Override public void populateDisplayData(DisplayData.Builder builder) {
       spec.populateDisplayData(builder);
     }
 
-    @Override
-    public Coder getCheckpointMarkCoder() {
+    @Override public Coder getCheckpointMarkCoder() {
       return VoidCoder.of();
     }
 
-    @Override
-    public Coder<String> getDefaultOutputCoder() {
+    @Override public Coder<String> getDefaultOutputCoder() {
       return StringUtf8Coder.of();
     }
 
@@ -330,22 +329,20 @@ public class RedisPubSubIO {
     private Instant currentTimestamp;
 
     public UnboundedRedisPubSubReader(UnboundedRedisPubSubSource source,
-                                      RedisService redisService) {
+        RedisService redisService) {
       this.source = source;
       this.redisService = redisService;
       this.queue = new LinkedBlockingQueue<>();
     }
 
-    @Override
-    public boolean start() throws IOException {
-      reader = redisService.createPubSubReader(source.spec.channels(),
-          source.spec.patterns(), queue);
+    @Override public boolean start() throws IOException {
+      reader = redisService
+          .createPubSubReader(source.spec.channels(), source.spec.patterns(), queue);
       reader.start();
       return advance();
     }
 
-    @Override
-    public boolean advance() throws IOException {
+    @Override public boolean advance() throws IOException {
       String message = queue.poll();
       if (message == null) {
         current = null;
@@ -359,40 +356,34 @@ public class RedisPubSubIO {
       return true;
     }
 
-    @Override
-    public void close() throws IOException {
+    @Override public void close() throws IOException {
       reader.close();
       reader = null;
     }
 
-    @Override
-    public Instant getWatermark() {
+    @Override public Instant getWatermark() {
       return currentTimestamp;
     }
 
-    @Override
-    public String getCurrent() {
+    @Override public String getCurrent() {
       if (current == null) {
         throw new NoSuchElementException();
       }
       return current;
     }
 
-    @Override
-    public UnboundedRedisPubSubSource getCurrentSource() {
+    @Override public UnboundedRedisPubSubSource getCurrentSource() {
       return source;
     }
 
-    @Override
-    public Instant getCurrentTimestamp() {
+    @Override public Instant getCurrentTimestamp() {
       return currentTimestamp;
     }
 
-    @Override
-    public UnboundedSource.CheckpointMark getCheckpointMark() {
+    @Override public UnboundedSource.CheckpointMark getCheckpointMark() {
       return new UnboundedSource.CheckpointMark() {
-        @Override
-        public void finalizeCheckpoint() throws IOException {
+
+        @Override public void finalizeCheckpoint() throws IOException {
           // nothing to do
         }
       };
@@ -403,20 +394,24 @@ public class RedisPubSubIO {
   /**
    * A {@link PTransform} to publish messages to Redis PubSub channels.
    */
-  @AutoValue
-  public abstract static class Write extends PTransform<PCollection<String>, PDone> {
+  @AutoValue public abstract static class Write extends PTransform<PCollection<String>, PDone> {
 
     @Nullable abstract RedisConnection connection();
+
     @Nullable abstract RedisService redisService();
+
     @Nullable abstract List<String> channels();
 
     abstract Builder builder();
 
-    @AutoValue.Builder
-    abstract static class Builder {
+    @AutoValue.Builder abstract static class Builder {
+
       abstract Builder setConnection(RedisConnection connection);
+
       abstract Builder setRedisService(RedisService redisService);
+
       abstract Builder setChannels(List<String> channels);
+
       abstract Write build();
     }
 
@@ -427,8 +422,8 @@ public class RedisPubSubIO {
      * @return The corresponding {@link Write} {@link PTransform}.
      */
     public Write withConnection(RedisConnection connection) {
-      checkArgument(connection != null, "RedisPubSubIO.write().withConnection"
-          + "(connection) called with null connection");
+      checkArgument(connection != null,
+          "RedisPubSubIO.write().withConnection" + "(connection) called with null connection");
       return builder().setConnection(connection).build();
     }
 
@@ -439,8 +434,8 @@ public class RedisPubSubIO {
      * @return The corresponding {@link Write} {@link PTransform}.
      */
     public Write withRedisService(RedisService redisService) {
-      checkArgument(redisService != null, "RedisPubSubIO.write().withRedisService(service) "
-          + "called with null service");
+      checkArgument(redisService != null,
+          "RedisPubSubIO.write().withRedisService(service) " + "called with null service");
       return builder().setRedisService(redisService).build();
     }
 
@@ -451,36 +446,33 @@ public class RedisPubSubIO {
      * @return The corresponding {@link Write} {@link PTransform}.
      */
     public Write withChannels(List<String> channels) {
-      checkArgument(channels != null, "RedisPubSubIO.write().withChannels(channels) called with"
-          + " null channels");
-      checkArgument(!channels.isEmpty(), "RedisPubSubIO.write().withChannels(channels) called "
-          + "with empty channels list");
+      checkArgument(channels != null,
+          "RedisPubSubIO.write().withChannels(channels) called with" + " null channels");
+      checkArgument(!channels.isEmpty(),
+          "RedisPubSubIO.write().withChannels(channels) called " + "with empty channels list");
       return builder().setChannels(channels).build();
     }
 
-    @Override
-    public PDone expand(PCollection<String> input) {
-      input.apply(ParDo.of(new WriteFn(this,
-          new SerializableFunction<PipelineOptions, RedisService>() {
-        @Override
-        public RedisService apply(PipelineOptions input) {
-          return getRedisService();
-        }
-      })));
+    @Override public PDone expand(PCollection<String> input) {
+      input.apply(
+          ParDo.of(new WriteFn(this, new SerializableFunction<PipelineOptions, RedisService>() {
+
+            @Override public RedisService apply(PipelineOptions input) {
+              return getRedisService();
+            }
+          })));
       return PDone.in(input.getPipeline());
     }
 
-    @Override
-    public void validate(PCollection<String> input) {
+    @Override public void validate(PipelineOptions options) {
       checkState(connection() != null || redisService() != null, "RedisPubSubIO.write() "
           + "requires a connection to be set via withConnection(connection) or a Redis service to"
           + "be set via withRedisService(service)");
-      checkState(channels() != null && channels().size() > 0, "RedisPubSubIO.write() requires a"
-          + " channel to be set via withChannels(channels)");
+      checkState(channels() != null && channels().size() > 0,
+          "RedisPubSubIO.write() requires a" + " channel to be set via withChannels(channels)");
     }
 
-    @Override
-    public void populateDisplayData(DisplayData.Builder builder) {
+    @Override public void populateDisplayData(DisplayData.Builder builder) {
       if (connection() != null) {
         connection().populateDisplayData(builder);
       }
@@ -500,13 +492,12 @@ public class RedisPubSubIO {
       private RedisService.PubSubWriter writer;
 
       public WriteFn(Write spec,
-                     SerializableFunction<PipelineOptions, RedisService> serviceFactory) {
+          SerializableFunction<PipelineOptions, RedisService> serviceFactory) {
         this.spec = spec;
         this.serviceFactory = serviceFactory;
       }
 
-      @StartBundle
-      public void startBundle(Context context) throws Exception {
+      @StartBundle public void startBundle(StartBundleContext context) throws Exception {
         if (writer == null) {
           writer = serviceFactory.apply(context.getPipelineOptions())
               .createPubSubWriter(spec.channels());
@@ -514,14 +505,12 @@ public class RedisPubSubIO {
         }
       }
 
-      @ProcessElement
-      public void processElement(ProcessContext processContext) throws Exception {
+      @ProcessElement public void processElement(ProcessContext processContext) throws Exception {
         String element = processContext.element();
         writer.publish(element);
       }
 
-      @Teardown
-      public void teardown() throws Exception {
+      @Teardown public void teardown() throws Exception {
         writer.close();
         writer = null;
       }
